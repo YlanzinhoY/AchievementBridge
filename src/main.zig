@@ -676,7 +676,7 @@ fn printHelp() void {
         \\  --wait-for-game    Aguardar um processo do diretorio do jogo antes da previa
         \\  --confirm-steam-write Confirmacao obrigatoria para alterar conquistas da conta Steam
         \\  --confirm-local-write Confirmacao obrigatoria para alterar estado local ou o store local
-        \\  --experimental-steam-notification Tentar o toast do Steam Overlay via StoreStats (experimental)
+        \\  --experimental-steam-notification Tentar toast do Overlay via StoreStats ou progresso (experimental)
         \\  --local-store PATH Sobrescrever o arquivo JSON de conquistas locais
         \\  --language LANG    Idioma do metadata local (padrao: brazilian)
         \\  --appid ID         Steam AppID para operacoes somente leitura

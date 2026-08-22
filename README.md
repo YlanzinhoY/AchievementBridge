@@ -125,7 +125,9 @@ achievement-bridge steam-local-sync --appid 3751950 --achievement ACObsidian_Ach
 
 Somente quando o cache ainda não contém a conquista, o Bridge carrega os stats pela ABI, chama `SetAchievement` e pede `StoreStats`. Ele não espera nem afirma persistência no servidor: `native_notification=store_queued` significa apenas que a Steam aceitou o pedido na fila local, que é o ponto normalmente associado ao toast do overlay. Essa chamada pode contatar os serviços da Steam.
 
-Os demais resultados (`not_new`, `already_unlocked`, `stats_unavailable`, `set_failed`, `store_failed` ou `steam_unavailable`) são explícitos no JSON para o host usar um fallback. O LuaTools só ativa essa rota para eventos novos em tempo real e mostra seu popup próprio quando a Steam não aceita enfileirar a tentativa.
+Quando `SetAchievement` é recusado, a mesma tentativa pede `IndicateAchievementProgress(API_NAME, 1, 2)`. Esse método oficial não desbloqueia nem persiste nada: ele apenas solicita ao Steam Overlay um toast de progresso usando o nome e a imagem reais da conquista. `native_notification=progress_queued` indica que a Steam aceitou esse fallback.
+
+Os demais resultados (`not_new`, `already_unlocked`, `stats_unavailable`, `set_failed`, `progress_failed`, `store_failed` ou `steam_unavailable`) são explícitos no JSON para o host usar um fallback. O LuaTools só ativa essa rota para eventos novos em tempo real e mostra seu popup próprio quando a Steam não aceita nenhuma das tentativas nativas.
 
 ## Ubisoft Connect oficial
 
