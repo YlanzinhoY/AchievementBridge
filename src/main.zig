@@ -1,0 +1,538 @@
+const std = @import("std");
+const bridge = @import("achievement_bridge");
+
+const Command = enum { scan, watch, probe, games, sessions, host, steam_read, steam_unlock, steam_watch, ubisoft_scan, ubisoft_watch, uplay_r2_diagnose, uplay_r2_prepare, uplay_r2_scan, uplay_r2_watch, notify_test, help };
+
+const Cli = struct {
+    command: Command = .watch,
+    roots: std.ArrayList([]const u8) = .empty,
+    journal_path: ?[]const u8 = null,
+    interval_ms: u32 = 500,
+    recover: bool = true,
+    game_dir: ?[]const u8 = null,
+    steam_root: ?[]const u8 = null,
+    notifications: bool = true,
+    schema_paths: std.ArrayList([]const u8) = .empty,
+    language: []const u8 = "brazilian",
+    app_id: ?u32 = null,
+    steam_mapping: bool = true,
+    once: bool = false,
+    catalog_path: ?[]const u8 = null,
+    achievement_id: ?[]const u8 = null,
+    duration_ms: u32 = 7000,
+    wait_for_game: bool = false,
+    confirm_steam_write: bool = false,
+};
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(allocator);
+    var cli = try parseArgs(allocator, args);
+
+    if (cli.command == .help) {
+        printHelp();
+        return;
+    }
+
+    if (cli.command == .probe) {
+        const game_dir = cli.game_dir orelse return error.MissingGameDir;
+        const steam_root = if (cli.steam_root) |root| try allocator.dupe(u8, root) else bridge.detector.steam_install.findSteamRoot(allocator, init.io) catch null;
+        if (steam_root) |root| {
+            var catalog = try bridge.detector.steam_install.discover(allocator, init.io, root);
+            defer catalog.deinit();
+            if (catalog.findByInstallDir(game_dir)) |app| {
+                std.debug.print("[AchievementBridge] identity appid={d} name={s}\n", .{ app.app_id, app.name });
+            }
+        }
+        var report = try bridge.detector.runtime.detect(allocator, init.io, game_dir);
+        defer report.deinit();
+        const candidates = try bridge.resolver.resolve(allocator, &report);
+        std.debug.print("[AchievementBridge] game_dir={s}\n", .{game_dir});
+        std.debug.print("Runtime candidates:\n", .{});
+        for (report.runtimes.items) |runtime| {
+            std.debug.print("  {s}: confidence={d} evidence={d}\n", .{ @tagName(runtime.kind), runtime.confidence, runtime.evidence_count });
+        }
+        std.debug.print("Provider candidates:\n", .{});
+        for (candidates) |candidate| {
+            std.debug.print("  {s}: confidence={d}\n", .{ @tagName(candidate.provider), candidate.confidence });
+        }
+        return;
+    }
+
+    if (cli.command == .games) {
+        const steam_root = if (cli.steam_root) |root| try allocator.dupe(u8, root) else try bridge.detector.steam_install.findSteamRoot(allocator, init.io);
+        var catalog = try bridge.detector.steam_install.discover(allocator, init.io, steam_root);
+        defer catalog.deinit();
+        std.debug.print("[AchievementBridge] steam_root={s} installed_apps={d}\n", .{ catalog.steam_root, catalog.apps.items.len });
+        for (catalog.apps.items) |app| std.debug.print("  appid={d} name={s} dir={s}\n", .{ app.app_id, app.name, app.install_dir });
+        return;
+    }
+
+    if (cli.command == .sessions) {
+        const steam_root = if (cli.steam_root) |root| try allocator.dupe(u8, root) else try bridge.detector.steam_install.findSteamRoot(allocator, init.io);
+        var catalog = try bridge.detector.steam_install.discover(allocator, init.io, steam_root);
+        defer catalog.deinit();
+        var processes = try bridge.detector.process.enumerate(allocator);
+        defer processes.deinit();
+        var found: usize = 0;
+        for (processes.items.items) |process| {
+            const process_dir = std.fs.path.dirname(process.executable_path) orelse continue;
+            const installed = findContainingApp(&catalog, process.executable_path);
+            if (installed == null and !bridge.detector.runtime.hasDirectIndicator(allocator, init.io, process_dir)) continue;
+            const game_dir = if (installed) |app| app.install_dir else process_dir;
+            var report = bridge.detector.runtime.detect(allocator, init.io, game_dir) catch continue;
+            defer report.deinit();
+            if (report.runtimes.items.len == 0) continue;
+            found += 1;
+            std.debug.print("[GameSession] pid={d} process={s}", .{ process.pid, process.name });
+            if (installed) |app| std.debug.print(" appid={d} name={s}", .{ app.app_id, app.name });
+            std.debug.print(" dir={s}\n", .{game_dir});
+            for (report.runtimes.items) |detected| std.debug.print("  runtime={s} confidence={d}\n", .{ @tagName(detected.kind), detected.confidence });
+        }
+        std.debug.print("[AchievementBridge] active_game_sessions={d}\n", .{found});
+        return;
+    }
+
+    if (cli.command == .host) {
+        const steam_root = if (cli.steam_root) |root| try allocator.dupe(u8, root) else try bridge.detector.steam_install.findSteamRoot(allocator, init.io);
+        var catalog = try bridge.detector.steam_install.discover(allocator, init.io, steam_root);
+        defer catalog.deinit();
+        var monitor = bridge.host.session_monitor.Monitor.init(allocator, init.io, &catalog);
+        defer monitor.deinit();
+        try monitor.run(.{ .interval_ms = cli.interval_ms, .once = cli.once });
+        return;
+    }
+
+    if (cli.command == .steam_read) {
+        const app_id = cli.app_id orelse return error.MissingAppId;
+        const steam_root = if (cli.steam_root) |root| try allocator.dupe(u8, root) else try bridge.detector.steam_install.findSteamRoot(allocator, init.io);
+        var session = try bridge.steam.adapter.connect(allocator, app_id, steam_root);
+        defer session.close();
+        var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
+        defer achievements.deinit();
+        std.debug.print("[SteamAdapter] connected=true appid={d} achievements={d}\n", .{ app_id, achievements.items.items.len });
+        for (achievements.items.items, 0..) |achievement, index| {
+            std.debug.print("[{d}] {s} {s} name={s}", .{ index, achievement.api_name, if (achievement.unlocked) "unlocked" else "locked", achievement.name });
+            if (achievement.global_percent) |percent| std.debug.print(" global={d:.2}%", .{percent});
+            if (achievement.unlock_time > 0) std.debug.print(" timestamp={d}", .{achievement.unlock_time});
+            std.debug.print("\n", .{});
+        }
+        return;
+    }
+
+    if (cli.command == .steam_unlock) {
+        if (!cli.confirm_steam_write) return error.SteamWriteConfirmationRequired;
+        const app_id = cli.app_id orelse return error.MissingAppId;
+        const wanted = cli.achievement_id orelse return error.MissingAchievement;
+        const steam_root = if (cli.steam_root) |root| try allocator.dupe(u8, root) else try bridge.detector.steam_install.findSteamRoot(allocator, init.io);
+        var session = try bridge.steam.adapter.connect(allocator, app_id, steam_root);
+        defer session.close();
+        var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
+        defer achievements.deinit();
+        const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
+        const result = bridge.steam.adapter.unlockAchievement(&session, allocator, init.io, achievement.api_name) catch |err| {
+            if (err == error.SetAchievementFailed) std.debug.print(
+                "[SteamWrite] appid={d} achievement={s} refused=true hint=achievement_may_be_protected_by_publisher\n",
+                .{ app_id, achievement.api_name },
+            );
+            return err;
+        };
+        std.debug.print(
+            "[SteamWrite] appid={d} achievement={s} name={s} result={s} server_acknowledged={}\n",
+            .{ app_id, achievement.api_name, achievement.name, @tagName(result), result == .stored },
+        );
+        return;
+    }
+
+    if (cli.command == .steam_watch) {
+        const app_id = cli.app_id orelse return error.MissingAppId;
+        const steam_root = if (cli.steam_root) |root| try allocator.dupe(u8, root) else try bridge.detector.steam_install.findSteamRoot(allocator, init.io);
+        const journal_path = cli.journal_path orelse try defaultJournalPath(allocator, init.environ_map);
+        try bridge.providers.steam.watcher.run(allocator, init.io, .{
+            .app_id = app_id,
+            .steam_root = steam_root,
+            .journal_path = journal_path,
+            .interval_ms = cli.interval_ms,
+            .recover = cli.recover,
+            .notifications = cli.notifications,
+        });
+        return;
+    }
+
+    if (cli.command == .ubisoft_scan or cli.command == .ubisoft_watch) {
+        const localappdata = init.environ_map.get("LOCALAPPDATA") orelse return error.MissingLocalAppData;
+        const spool_root = if (cli.roots.items.len > 0) cli.roots.items[0] else try std.fs.path.join(allocator, &.{ localappdata, "Ubisoft Game Launcher", "spool" });
+        if (cli.command == .ubisoft_scan) {
+            try bridge.providers.ubisoft.watcher.scan(allocator, init.io, spool_root);
+        } else {
+            const journal_path = cli.journal_path orelse try defaultJournalPath(allocator, init.environ_map);
+            try bridge.providers.ubisoft.watcher.run(allocator, init.io, .{
+                .spool_root = spool_root,
+                .journal_path = journal_path,
+                .interval_ms = cli.interval_ms,
+                .recover = cli.recover,
+                .notifications = cli.notifications,
+            });
+        }
+        return;
+    }
+
+    if (cli.command == .uplay_r2_diagnose) {
+        const game_dir = cli.game_dir orelse return error.MissingGameDir;
+        const report = try bridge.providers.uplay_r2.diagnostic.diagnose(allocator, init.io, game_dir);
+        std.debug.print("[UplayR2Provider] loader={} config={} schema={} enabled={} ready={}\n", .{
+            report.loader_found,
+            report.config_found,
+            report.schema_found,
+            report.achievements_enabled,
+            report.ready(),
+        });
+        return;
+    }
+
+    if (cli.command == .uplay_r2_prepare) {
+        const game_dir = cli.game_dir orelse return error.MissingGameDir;
+        const catalog_path = cli.catalog_path orelse return error.MissingCatalog;
+        const before = try bridge.providers.uplay_r2.diagnostic.diagnose(allocator, init.io, game_dir);
+        if (!before.loader_found) return error.UplayR2LoaderNotFound;
+        if (!before.config_found) return error.UplayR2ConfigNotFound;
+
+        const catalog_bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, catalog_path, allocator, .limited(32 * 1024 * 1024));
+        defer allocator.free(catalog_bytes);
+        var rendered = try bridge.providers.uplay_r2.schema.renderCatalog(allocator, catalog_bytes);
+        defer rendered.deinit(allocator);
+
+        const schema_path = try std.fs.path.join(allocator, &.{ game_dir, "achievements_schema.json" });
+        try backupExisting(allocator, init.io, schema_path);
+        try writeAtomic(init.io, schema_path, rendered.bytes);
+
+        const config_path = try findUplayR2Config(allocator, init.io, game_dir);
+        const config_bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, config_path, allocator, .limited(1024 * 1024));
+        defer allocator.free(config_bytes);
+        const enabled_config = try bridge.providers.uplay_r2.schema.enableAchievements(allocator, config_bytes);
+        defer allocator.free(enabled_config);
+        try backupExisting(allocator, init.io, config_path);
+        try writeAtomic(init.io, config_path, enabled_config);
+
+        const after = try bridge.providers.uplay_r2.diagnostic.diagnose(allocator, init.io, game_dir);
+        std.debug.print(
+            "[UplayR2Prepare] schema={s} achievements={d} ignored_legacy_ids={d} backup_suffix=.achievement-bridge.bak ready={}\n",
+            .{ schema_path, rendered.info.achievement_count, rendered.info.ignored_legacy_ids, after.ready() },
+        );
+        return;
+    }
+
+    if (cli.command == .notify_test) {
+        const app_id = cli.app_id orelse return error.MissingAppId;
+        const wanted = cli.achievement_id orelse return error.MissingAchievement;
+        if (cli.wait_for_game) {
+            const game_dir = cli.game_dir orelse return error.MissingGameDir;
+            std.debug.print("[NotificationPreview] status=waiting_for_game dir={s}\n", .{game_dir});
+            while (!try gameRunning(game_dir)) try std.Io.sleep(init.io, .fromMilliseconds(500), .awake);
+            std.debug.print("[NotificationPreview] status=game_detected\n", .{});
+        }
+        const steam_root = if (cli.steam_root) |root| try allocator.dupe(u8, root) else try bridge.detector.steam_install.findSteamRoot(allocator, init.io);
+        var session = try bridge.steam.adapter.connect(allocator, app_id, steam_root);
+        defer session.close();
+        var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
+        defer achievements.deinit();
+        const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
+        const now = unixNow(init.io);
+        var notifier = try bridge.notifications.windows.Notifier.init();
+        defer notifier.deinit();
+        try notifier.show(allocator, .{
+            .app_id = app_id,
+            .source_id = numericSuffix(achievement.api_name) orelse achievement.api_name,
+            .provider = .uplay_r2,
+            .unlocked_at = now,
+            .detected_at = now,
+        }, achievement.name, achievement.description, achievement.global_percent);
+        std.debug.print("[NotificationPreview] appid={d} achievement={s} name={s} duration_ms={d}\n", .{ app_id, achievement.api_name, achievement.name, cli.duration_ms });
+        try std.Io.sleep(init.io, .fromMilliseconds(cli.duration_ms), .awake);
+        return;
+    }
+
+    if (cli.command == .uplay_r2_scan or cli.command == .uplay_r2_watch) {
+        if (cli.roots.items.len == 0) {
+            if (init.environ_map.get("APPDATA")) |appdata| try cli.roots.append(allocator, try std.fs.path.join(allocator, &.{ appdata, "Goldberg UplayEmu Saves" }));
+            if (cli.game_dir) |game_dir| try cli.roots.append(allocator, try std.fs.path.join(allocator, &.{ game_dir, "saves" }));
+        }
+        if (cli.command == .uplay_r2_scan) {
+            try bridge.providers.uplay_r2.watcher.scan(allocator, init.io, cli.roots.items);
+        } else {
+            const journal_path = cli.journal_path orelse try defaultJournalPath(allocator, init.environ_map);
+            const mapping_root: ?[]const u8 = if (cli.app_id != null)
+                if (cli.steam_root) |root| root else bridge.detector.steam_install.findSteamRoot(allocator, init.io) catch null
+            else
+                null;
+            try bridge.providers.uplay_r2.watcher.run(allocator, init.io, .{
+                .roots = cli.roots.items,
+                .journal_path = journal_path,
+                .interval_ms = cli.interval_ms,
+                .recover = cli.recover,
+                .notifications = cli.notifications,
+                .steam_app_id = cli.app_id,
+                .steam_root = mapping_root,
+            });
+        }
+        return;
+    }
+
+    if (cli.roots.items.len == 0) {
+        if (init.environ_map.get("APPDATA")) |appdata| {
+            try cli.roots.append(allocator, try std.fs.path.join(allocator, &.{ appdata, "GSE Saves" }));
+            try cli.roots.append(allocator, try std.fs.path.join(allocator, &.{ appdata, "Goldberg SteamEmu Saves" }));
+        }
+    }
+    if (cli.roots.items.len == 0) return error.NoGseRoot;
+
+    const journal_path = cli.journal_path orelse try defaultJournalPath(allocator, init.environ_map);
+    const mapping_steam_root: ?[]const u8 = if (cli.steam_mapping)
+        if (cli.steam_root) |root| root else bridge.detector.steam_install.findSteamRoot(allocator, init.io) catch null
+    else
+        null;
+
+    switch (cli.command) {
+        .scan => try bridge.gse.watcher.scan(allocator, init.io, cli.roots.items),
+        .watch => try bridge.gse.watcher.run(allocator, init.io, .{
+            .roots = cli.roots.items,
+            .journal_path = journal_path,
+            .interval_ms = cli.interval_ms,
+            .recover = cli.recover,
+            .notifications = cli.notifications,
+            .schema_paths = cli.schema_paths.items,
+            .language = cli.language,
+            .steam_root = mapping_steam_root,
+        }),
+        .probe => unreachable,
+        .games => unreachable,
+        .sessions => unreachable,
+        .host => unreachable,
+        .steam_read => unreachable,
+        .steam_unlock => unreachable,
+        .steam_watch => unreachable,
+        .ubisoft_scan => unreachable,
+        .ubisoft_watch => unreachable,
+        .uplay_r2_diagnose => unreachable,
+        .uplay_r2_prepare => unreachable,
+        .uplay_r2_scan => unreachable,
+        .uplay_r2_watch => unreachable,
+        .notify_test => unreachable,
+        .help => unreachable,
+    }
+}
+
+fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli {
+    var cli = Cli{};
+    var index: usize = 1;
+    if (index < args.len and !std.mem.startsWith(u8, args[index], "--")) {
+        if (std.mem.eql(u8, args[index], "scan")) cli.command = .scan else if (std.mem.eql(u8, args[index], "watch")) cli.command = .watch else if (std.mem.eql(u8, args[index], "probe")) cli.command = .probe else if (std.mem.eql(u8, args[index], "games")) cli.command = .games else if (std.mem.eql(u8, args[index], "sessions")) cli.command = .sessions else if (std.mem.eql(u8, args[index], "host")) cli.command = .host else if (std.mem.eql(u8, args[index], "steam-read")) cli.command = .steam_read else if (std.mem.eql(u8, args[index], "steam-unlock")) cli.command = .steam_unlock else if (std.mem.eql(u8, args[index], "steam-watch")) cli.command = .steam_watch else if (std.mem.eql(u8, args[index], "ubisoft-scan")) cli.command = .ubisoft_scan else if (std.mem.eql(u8, args[index], "ubisoft-watch")) cli.command = .ubisoft_watch else if (std.mem.eql(u8, args[index], "uplay-r2-diagnose")) cli.command = .uplay_r2_diagnose else if (std.mem.eql(u8, args[index], "uplay-r2-prepare")) cli.command = .uplay_r2_prepare else if (std.mem.eql(u8, args[index], "uplay-r2-scan")) cli.command = .uplay_r2_scan else if (std.mem.eql(u8, args[index], "uplay-r2-watch")) cli.command = .uplay_r2_watch else if (std.mem.eql(u8, args[index], "notify-test")) cli.command = .notify_test else if (std.mem.eql(u8, args[index], "help")) cli.command = .help else return error.UnknownCommand;
+        index += 1;
+    }
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            cli.command = .help;
+        } else if (std.mem.eql(u8, arg, "--no-recovery")) {
+            cli.recover = false;
+        } else if (std.mem.eql(u8, arg, "--no-notifications")) {
+            cli.notifications = false;
+        } else if (std.mem.eql(u8, arg, "--no-steam-mapping")) {
+            cli.steam_mapping = false;
+        } else if (std.mem.eql(u8, arg, "--once")) {
+            cli.once = true;
+        } else if (std.mem.eql(u8, arg, "--wait-for-game")) {
+            cli.wait_for_game = true;
+        } else if (std.mem.eql(u8, arg, "--confirm-steam-write")) {
+            cli.confirm_steam_write = true;
+        } else if (std.mem.eql(u8, arg, "--catalog")) {
+            index += 1;
+            if (index >= args.len) return error.MissingOptionValue;
+            cli.catalog_path = args[index];
+        } else if (std.mem.eql(u8, arg, "--achievement")) {
+            index += 1;
+            if (index >= args.len) return error.MissingOptionValue;
+            cli.achievement_id = args[index];
+        } else if (std.mem.eql(u8, arg, "--duration-ms")) {
+            index += 1;
+            if (index >= args.len) return error.MissingOptionValue;
+            cli.duration_ms = try std.fmt.parseInt(u32, args[index], 10);
+            if (cli.duration_ms < 1000 or cli.duration_ms > 60_000) return error.InvalidNotificationDuration;
+        } else if (std.mem.eql(u8, arg, "--root")) {
+            index += 1;
+            if (index >= args.len) return error.MissingOptionValue;
+            try cli.roots.append(allocator, args[index]);
+        } else if (std.mem.eql(u8, arg, "--game-dir")) {
+            index += 1;
+            if (index >= args.len) return error.MissingOptionValue;
+            cli.game_dir = args[index];
+        } else if (std.mem.eql(u8, arg, "--steam-root")) {
+            index += 1;
+            if (index >= args.len) return error.MissingOptionValue;
+            cli.steam_root = args[index];
+        } else if (std.mem.eql(u8, arg, "--schema")) {
+            index += 1;
+            if (index >= args.len) return error.MissingOptionValue;
+            try cli.schema_paths.append(allocator, args[index]);
+        } else if (std.mem.eql(u8, arg, "--language")) {
+            index += 1;
+            if (index >= args.len) return error.MissingOptionValue;
+            cli.language = args[index];
+        } else if (std.mem.eql(u8, arg, "--appid")) {
+            index += 1;
+            if (index >= args.len) return error.MissingOptionValue;
+            cli.app_id = try std.fmt.parseInt(u32, args[index], 10);
+        } else if (std.mem.eql(u8, arg, "--journal")) {
+            index += 1;
+            if (index >= args.len) return error.MissingOptionValue;
+            cli.journal_path = args[index];
+        } else if (std.mem.eql(u8, arg, "--interval-ms")) {
+            index += 1;
+            if (index >= args.len) return error.MissingOptionValue;
+            cli.interval_ms = try std.fmt.parseInt(u32, args[index], 10);
+            if (cli.interval_ms < 100) return error.IntervalTooSmall;
+        } else {
+            return error.UnknownOption;
+        }
+    }
+    return cli;
+}
+
+fn printHelp() void {
+    std.debug.print(
+        \\Achievement Bridge 0.1.0 - GSE Provider MVP
+        \\
+        \\Uso:
+        \\  achievement-bridge scan [--root PATH]
+        \\  achievement-bridge watch [--root PATH] [--journal PATH] [--interval-ms 500]
+        \\  achievement-bridge probe --game-dir PATH
+        \\  achievement-bridge games [--steam-root PATH]
+        \\  achievement-bridge sessions [--steam-root PATH]
+        \\  achievement-bridge host [--steam-root PATH] [--interval-ms 1000]
+        \\  achievement-bridge steam-read --appid ID [--steam-root PATH]
+        \\  achievement-bridge steam-unlock --appid ID --achievement API_NAME --confirm-steam-write
+        \\  achievement-bridge steam-watch --appid ID [--steam-root PATH]
+        \\  achievement-bridge ubisoft-scan [--root SPOOL_PATH]
+        \\  achievement-bridge ubisoft-watch [--root SPOOL_PATH]
+        \\  achievement-bridge uplay-r2-diagnose --game-dir PATH
+        \\  achievement-bridge uplay-r2-prepare --game-dir PATH --catalog FILE
+        \\  achievement-bridge uplay-r2-scan [--root SAVE_PATH]
+        \\  achievement-bridge uplay-r2-watch [--root SAVE_PATH] [--appid STEAM_ID]
+        \\  achievement-bridge notify-test --appid ID --achievement API_NAME [--wait-for-game --game-dir PATH]
+        \\
+        \\Sem --root, observa automaticamente:
+        \\  %APPDATA%\\GSE Saves
+        \\  %APPDATA%\\Goldberg SteamEmu Saves
+        \\
+        \\Opcoes:
+        \\  --root PATH        Root contendo pastas <appid>, ou a propria pasta <appid>
+        \\  --game-dir PATH    Pasta do jogo para detectar runtimes e providers
+        \\  --steam-root PATH  Sobrescrever a instalacao Steam detectada no Registry
+        \\  --schema PATH      Schema GSE steam_settings/achievements.json (repetivel)
+        \\  --catalog PATH     Catalogo ordenado para gerar achievements_schema.json
+        \\  --achievement ID   API name ou sufixo numerico para a previa da notificacao
+        \\  --duration-ms N    Tempo da previa na bandeja (1000-60000; padrao: 7000)
+        \\  --wait-for-game    Aguardar um processo do diretorio do jogo antes da previa
+        \\  --confirm-steam-write Confirmacao obrigatoria para alterar conquistas da conta Steam
+        \\  --language LANG    Idioma do metadata local (padrao: brazilian)
+        \\  --appid ID         Steam AppID para operacoes somente leitura
+        \\  --journal PATH     Journal JSONL para recovery e deduplicacao
+        \\  --no-recovery      Nao reproduzir unlocks ocorridos enquanto o bridge estava fechado
+        \\  --no-notifications Desativar popup e som nativos do Windows
+        \\  --no-steam-mapping Nao buscar metadata/mapping exato pelo Steam Client
+        \\  --once             Executar apenas um ciclo do monitor de sessoes
+        \\  --interval-ms N    Intervalo de observacao (minimo 100 ms)
+        \\  -h, --help         Mostrar esta ajuda
+        \\
+    , .{});
+}
+
+fn defaultJournalPath(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {
+    if (environ_map.get("LOCALAPPDATA")) |localappdata| {
+        return std.fs.path.join(allocator, &.{ localappdata, "AchievementBridge", "journal.jsonl" });
+    }
+    return ".achievement-bridge/journal.jsonl";
+}
+
+fn findAchievement(items: []const bridge.steam.user_stats.AchievementState, wanted: []const u8) ?*const bridge.steam.user_stats.AchievementState {
+    for (items) |*achievement| {
+        if (std.ascii.eqlIgnoreCase(achievement.api_name, wanted)) return achievement;
+        if (numericSuffix(achievement.api_name)) |suffix| if (std.mem.eql(u8, suffix, wanted)) return achievement;
+    }
+    return null;
+}
+
+fn numericSuffix(api_name: []const u8) ?[]const u8 {
+    var start = api_name.len;
+    while (start > 0 and std.ascii.isDigit(api_name[start - 1])) start -= 1;
+    if (start == api_name.len) return null;
+    return api_name[start..];
+}
+
+fn findUplayR2Config(allocator: std.mem.Allocator, io: std.Io, game_dir: []const u8) ![]u8 {
+    for ([_][]const u8{ "upc_r2.ini", "uplay_r2.ini" }) |name| {
+        const path = try std.fs.path.join(allocator, &.{ game_dir, name });
+        std.Io.Dir.cwd().access(io, path, .{}) catch {
+            allocator.free(path);
+            continue;
+        };
+        return path;
+    }
+    return error.UplayR2ConfigNotFound;
+}
+
+fn backupExisting(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+    std.Io.Dir.cwd().access(io, path, .{}) catch return;
+    const backup_path = try std.fmt.allocPrint(allocator, "{s}.achievement-bridge.bak", .{path});
+    defer allocator.free(backup_path);
+    if (std.Io.Dir.cwd().access(io, backup_path, .{})) |_| return else |_| {}
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
+    defer allocator.free(bytes);
+    try writeAtomic(io, backup_path, bytes);
+}
+
+fn writeAtomic(io: std.Io, path: []const u8, bytes: []const u8) !void {
+    var atomic = try std.Io.Dir.cwd().createFileAtomic(io, path, .{
+        .make_path = true,
+        .replace = true,
+    });
+    defer atomic.deinit(io);
+    try atomic.file.writePositionalAll(io, bytes, 0);
+    try atomic.replace(io);
+}
+
+fn unixNow(io: std.Io) i64 {
+    return @intCast(@divTrunc(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+}
+
+fn gameRunning(game_dir: []const u8) !bool {
+    var processes = try bridge.detector.process.enumerate(std.heap.page_allocator);
+    defer processes.deinit();
+    const normalized = std.mem.trimEnd(u8, game_dir, "\\/");
+    for (processes.items.items) |process| {
+        if (process.executable_path.len <= normalized.len) continue;
+        if (!std.ascii.startsWithIgnoreCase(process.executable_path, normalized)) continue;
+        const boundary = process.executable_path[normalized.len];
+        if (boundary == '\\' or boundary == '/') return true;
+    }
+    return false;
+}
+
+fn findContainingApp(catalog: *const bridge.detector.steam_install.Catalog, executable_path: []const u8) ?*const bridge.detector.steam_install.InstalledApp {
+    for (catalog.apps.items) |*app| {
+        if (executable_path.len <= app.install_dir.len) continue;
+        if (!std.ascii.startsWithIgnoreCase(executable_path, app.install_dir)) continue;
+        const boundary = executable_path[app.install_dir.len];
+        if (boundary == '\\' or boundary == '/') return app;
+    }
+    return null;
+}
+
+test "parse CLI roots and interval" {
+    const allocator = std.testing.allocator;
+    var cli = try parseArgs(allocator, &.{ "achievement-bridge", "watch", "--root", "X:/saves", "--interval-ms", "750" });
+    defer cli.roots.deinit(allocator);
+    try std.testing.expectEqual(Command.watch, cli.command);
+    try std.testing.expectEqual(@as(u32, 750), cli.interval_ms);
+    try std.testing.expectEqualStrings("X:/saves", cli.roots.items[0]);
+}
