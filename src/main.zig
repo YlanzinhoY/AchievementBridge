@@ -1,7 +1,7 @@
 const std = @import("std");
 const bridge = @import("achievement_bridge");
 
-const Command = enum { scan, watch, probe, games, sessions, host, steam_read, steam_unlock, steam_watch, ubisoft_scan, ubisoft_watch, uplay_r2_diagnose, uplay_r2_prepare, uplay_r2_scan, uplay_r2_watch, notify_test, help };
+const Command = enum { scan, watch, probe, games, sessions, host, catalog, local_record, steam_read, steam_unlock, steam_watch, ubisoft_scan, ubisoft_watch, uplay_r2_diagnose, uplay_r2_prepare, uplay_r2_scan, uplay_r2_watch, notify_test, help };
 
 const Cli = struct {
     command: Command = .watch,
@@ -22,6 +22,8 @@ const Cli = struct {
     duration_ms: u32 = 7000,
     wait_for_game: bool = false,
     confirm_steam_write: bool = false,
+    confirm_local_write: bool = false,
+    local_store_path: ?[]const u8 = null,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -108,6 +110,8 @@ pub fn main(init: std.process.Init) !void {
         const steam_root = if (cli.steam_root) |root| try allocator.dupe(u8, root) else try bridge.detector.steam_install.findSteamRoot(allocator, init.io);
         var session = try bridge.steam.adapter.connect(allocator, app_id, steam_root);
         defer session.close();
+        session.client.loadCurrentUserStats(init.io, app_id, 10_000) catch |err|
+            std.debug.print("[SteamAdapter] appid={d} stats_refresh_warning={s}\n", .{ app_id, @errorName(err) });
         var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
         defer achievements.deinit();
         std.debug.print("[SteamAdapter] connected=true appid={d} achievements={d}\n", .{ app_id, achievements.items.items.len });
@@ -117,6 +121,49 @@ pub fn main(init: std.process.Init) !void {
             if (achievement.unlock_time > 0) std.debug.print(" timestamp={d}", .{achievement.unlock_time});
             std.debug.print("\n", .{});
         }
+        return;
+    }
+
+    if (cli.command == .catalog) {
+        const app_id = cli.app_id orelse return error.MissingAppId;
+        const steam_root = if (cli.steam_root) |root| try allocator.dupe(u8, root) else try bridge.detector.steam_install.findSteamRoot(allocator, init.io);
+        var session = try bridge.steam.adapter.connect(allocator, app_id, steam_root);
+        defer session.close();
+        session.client.loadCurrentUserStats(init.io, app_id, 10_000) catch |err|
+            std.debug.print("[SteamCatalog] appid={d} stats_refresh_warning={s}\n", .{ app_id, @errorName(err) });
+        var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
+        defer achievements.deinit();
+        const store_path = cli.local_store_path orelse try defaultLocalStorePath(allocator, init.environ_map);
+        var local = try bridge.local.store.Store.init(allocator, init.io, store_path);
+        defer local.deinit();
+        const json = try bridge.catalog.renderSteam(allocator, app_id, achievements.items.items, &local);
+        defer allocator.free(json);
+        try std.Io.File.stdout().writeStreamingAll(init.io, json);
+        try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+        return;
+    }
+
+    if (cli.command == .local_record) {
+        if (!cli.confirm_local_write) return error.LocalWriteConfirmationRequired;
+        const app_id = cli.app_id orelse return error.MissingAppId;
+        const wanted = cli.achievement_id orelse return error.MissingAchievement;
+        const steam_root = if (cli.steam_root) |root| try allocator.dupe(u8, root) else try bridge.detector.steam_install.findSteamRoot(allocator, init.io);
+        var session = try bridge.steam.adapter.connect(allocator, app_id, steam_root);
+        defer session.close();
+        session.client.loadCurrentUserStats(init.io, app_id, 10_000) catch |err|
+            std.debug.print("[LocalStore] appid={d} stats_refresh_warning={s}\n", .{ app_id, @errorName(err) });
+        var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
+        defer achievements.deinit();
+        const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
+        const unlocked_at = if (achievement.unlocked and achievement.unlock_time > 0) achievement.unlock_time else unixNow(init.io);
+        const store_path = cli.local_store_path orelse try defaultLocalStorePath(allocator, init.environ_map);
+        var local = try bridge.local.store.Store.init(allocator, init.io, store_path);
+        defer local.deinit();
+        try local.record(app_id, achievement.api_name, unlocked_at);
+        std.debug.print(
+            "[LocalStore] appid={d} achievement={s} name={s} recorded=true steam_was_unlocked={} path={s}\n",
+            .{ app_id, achievement.api_name, achievement.name, achievement.unlocked, store_path },
+        );
         return;
     }
 
@@ -308,6 +355,8 @@ pub fn main(init: std.process.Init) !void {
         .games => unreachable,
         .sessions => unreachable,
         .host => unreachable,
+        .catalog => unreachable,
+        .local_record => unreachable,
         .steam_read => unreachable,
         .steam_unlock => unreachable,
         .steam_watch => unreachable,
@@ -326,7 +375,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli {
     var cli = Cli{};
     var index: usize = 1;
     if (index < args.len and !std.mem.startsWith(u8, args[index], "--")) {
-        if (std.mem.eql(u8, args[index], "scan")) cli.command = .scan else if (std.mem.eql(u8, args[index], "watch")) cli.command = .watch else if (std.mem.eql(u8, args[index], "probe")) cli.command = .probe else if (std.mem.eql(u8, args[index], "games")) cli.command = .games else if (std.mem.eql(u8, args[index], "sessions")) cli.command = .sessions else if (std.mem.eql(u8, args[index], "host")) cli.command = .host else if (std.mem.eql(u8, args[index], "steam-read")) cli.command = .steam_read else if (std.mem.eql(u8, args[index], "steam-unlock")) cli.command = .steam_unlock else if (std.mem.eql(u8, args[index], "steam-watch")) cli.command = .steam_watch else if (std.mem.eql(u8, args[index], "ubisoft-scan")) cli.command = .ubisoft_scan else if (std.mem.eql(u8, args[index], "ubisoft-watch")) cli.command = .ubisoft_watch else if (std.mem.eql(u8, args[index], "uplay-r2-diagnose")) cli.command = .uplay_r2_diagnose else if (std.mem.eql(u8, args[index], "uplay-r2-prepare")) cli.command = .uplay_r2_prepare else if (std.mem.eql(u8, args[index], "uplay-r2-scan")) cli.command = .uplay_r2_scan else if (std.mem.eql(u8, args[index], "uplay-r2-watch")) cli.command = .uplay_r2_watch else if (std.mem.eql(u8, args[index], "notify-test")) cli.command = .notify_test else if (std.mem.eql(u8, args[index], "help")) cli.command = .help else return error.UnknownCommand;
+        if (std.mem.eql(u8, args[index], "scan")) cli.command = .scan else if (std.mem.eql(u8, args[index], "watch")) cli.command = .watch else if (std.mem.eql(u8, args[index], "probe")) cli.command = .probe else if (std.mem.eql(u8, args[index], "games")) cli.command = .games else if (std.mem.eql(u8, args[index], "sessions")) cli.command = .sessions else if (std.mem.eql(u8, args[index], "host")) cli.command = .host else if (std.mem.eql(u8, args[index], "catalog")) cli.command = .catalog else if (std.mem.eql(u8, args[index], "local-record")) cli.command = .local_record else if (std.mem.eql(u8, args[index], "steam-read")) cli.command = .steam_read else if (std.mem.eql(u8, args[index], "steam-unlock")) cli.command = .steam_unlock else if (std.mem.eql(u8, args[index], "steam-watch")) cli.command = .steam_watch else if (std.mem.eql(u8, args[index], "ubisoft-scan")) cli.command = .ubisoft_scan else if (std.mem.eql(u8, args[index], "ubisoft-watch")) cli.command = .ubisoft_watch else if (std.mem.eql(u8, args[index], "uplay-r2-diagnose")) cli.command = .uplay_r2_diagnose else if (std.mem.eql(u8, args[index], "uplay-r2-prepare")) cli.command = .uplay_r2_prepare else if (std.mem.eql(u8, args[index], "uplay-r2-scan")) cli.command = .uplay_r2_scan else if (std.mem.eql(u8, args[index], "uplay-r2-watch")) cli.command = .uplay_r2_watch else if (std.mem.eql(u8, args[index], "notify-test")) cli.command = .notify_test else if (std.mem.eql(u8, args[index], "help")) cli.command = .help else return error.UnknownCommand;
         index += 1;
     }
     while (index < args.len) : (index += 1) {
@@ -345,6 +394,12 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli {
             cli.wait_for_game = true;
         } else if (std.mem.eql(u8, arg, "--confirm-steam-write")) {
             cli.confirm_steam_write = true;
+        } else if (std.mem.eql(u8, arg, "--confirm-local-write")) {
+            cli.confirm_local_write = true;
+        } else if (std.mem.eql(u8, arg, "--local-store")) {
+            index += 1;
+            if (index >= args.len) return error.MissingOptionValue;
+            cli.local_store_path = args[index];
         } else if (std.mem.eql(u8, arg, "--catalog")) {
             index += 1;
             if (index >= args.len) return error.MissingOptionValue;
@@ -409,6 +464,8 @@ fn printHelp() void {
         \\  achievement-bridge games [--steam-root PATH]
         \\  achievement-bridge sessions [--steam-root PATH]
         \\  achievement-bridge host [--steam-root PATH] [--interval-ms 1000]
+        \\  achievement-bridge catalog --appid ID [--steam-root PATH]
+        \\  achievement-bridge local-record --appid ID --achievement API_NAME --confirm-local-write
         \\  achievement-bridge steam-read --appid ID [--steam-root PATH]
         \\  achievement-bridge steam-unlock --appid ID --achievement API_NAME --confirm-steam-write
         \\  achievement-bridge steam-watch --appid ID [--steam-root PATH]
@@ -434,6 +491,8 @@ fn printHelp() void {
         \\  --duration-ms N    Tempo da previa na bandeja (1000-60000; padrao: 7000)
         \\  --wait-for-game    Aguardar um processo do diretorio do jogo antes da previa
         \\  --confirm-steam-write Confirmacao obrigatoria para alterar conquistas da conta Steam
+        \\  --confirm-local-write Confirmacao obrigatoria para persistir somente no store local
+        \\  --local-store PATH Sobrescrever o arquivo JSON de conquistas locais
         \\  --language LANG    Idioma do metadata local (padrao: brazilian)
         \\  --appid ID         Steam AppID para operacoes somente leitura
         \\  --journal PATH     Journal JSONL para recovery e deduplicacao
@@ -452,6 +511,13 @@ fn defaultJournalPath(allocator: std.mem.Allocator, environ_map: *const std.proc
         return std.fs.path.join(allocator, &.{ localappdata, "AchievementBridge", "journal.jsonl" });
     }
     return ".achievement-bridge/journal.jsonl";
+}
+
+fn defaultLocalStorePath(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {
+    if (environ_map.get("LOCALAPPDATA")) |localappdata| {
+        return std.fs.path.join(allocator, &.{ localappdata, "AchievementBridge", "local-achievements.json" });
+    }
+    return ".achievement-bridge/local-achievements.json";
 }
 
 fn findAchievement(items: []const bridge.steam.user_stats.AchievementState, wanted: []const u8) ?*const bridge.steam.user_stats.AchievementState {
