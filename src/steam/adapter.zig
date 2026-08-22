@@ -31,12 +31,12 @@ pub const UnlockResult = enum {
 pub const NotificationRequestResult = enum {
     already_unlocked,
     store_queued,
+    progress_queued,
 };
 
-/// Experimental notification path. This deliberately stops after Steam has
-/// accepted StoreStats into its local job queue: the native overlay notification
-/// is associated with that transition, while a server acknowledgement may be
-/// delayed, rejected, or unavailable for a locally managed AppID.
+/// Experimental notification path. It first tries the normal achievement write.
+/// If Steam refuses SetAchievement, it asks the overlay for a 1/2 progress toast
+/// for the same API name; that fallback changes no Steam achievement state.
 pub fn queueAchievementNotification(session: *Session, allocator: std.mem.Allocator, io: std.Io, api_name: []const u8) !NotificationRequestResult {
     if (api_name.len == 0 or api_name.len > 127 or std.mem.indexOfScalar(u8, api_name, 0) != null) return error.InvalidAchievementApiName;
     const api_name_z = try allocator.dupeZ(u8, api_name);
@@ -51,7 +51,11 @@ pub fn queueAchievementNotification(session: *Session, allocator: std.mem.Alloca
         }
         try std.Io.sleep(io, .fromMilliseconds(100), .awake);
     }
-    if (!set) return error.SetAchievementFailed;
+    if (!set) {
+        if (!session.client.user_stats.indicateAchievementProgress(api_name_z, 1, 2))
+            return error.AchievementProgressNotificationFailed;
+        return .progress_queued;
+    }
     if (!session.client.user_stats.storeStats()) return error.StoreStatsFailed;
     return .store_queued;
 }

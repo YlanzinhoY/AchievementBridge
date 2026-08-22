@@ -17,10 +17,12 @@ pub const NativeNotificationStatus = enum {
     not_requested,
     not_new,
     store_queued,
+    progress_queued,
     already_unlocked,
     steam_unavailable,
     stats_unavailable,
     set_failed,
+    progress_failed,
     store_failed,
 };
 
@@ -224,13 +226,14 @@ fn tryNativeNotification(
         error.UserStatsCallbackTimeout,
         error.GetAchievementFailed,
         => .stats_unavailable,
-        error.SetAchievementFailed => .set_failed,
+        error.AchievementProgressNotificationFailed => .progress_failed,
         error.StoreStatsFailed => .store_failed,
         else => .steam_unavailable,
     };
     return switch (queued) {
         .already_unlocked => .already_unlocked,
         .store_queued => .store_queued,
+        .progress_queued => .progress_queued,
     };
 }
 

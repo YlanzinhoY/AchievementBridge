@@ -56,6 +56,13 @@ pub const UserStats = struct {
         return vtable.getMethod(self.pointer, 9, Function)(self.pointer) != 0;
     }
 
+    /// Asks the Steam Overlay to display the native progress notification.
+    /// This does not change or persist achievement state.
+    pub fn indicateAchievementProgress(self: *const UserStats, api_name: [*:0]const u8, current: u32, maximum: u32) bool {
+        const Function = *const fn (*anyopaque, [*:0]const u8, u32, u32) callconv(.c) u8;
+        return vtable.getMethod(self.pointer, 12, Function)(self.pointer, api_name, current, maximum) != 0;
+    }
+
     pub fn requestUserStats(self: *const UserStats, steam_id: u64) u64 {
         const Function = *const fn (*anyopaque, u64) callconv(.c) u64;
         return vtable.getMethod(self.pointer, 15, Function)(self.pointer, steam_id);
@@ -133,10 +140,11 @@ pub const UserStats = struct {
     }
 };
 
-test "Steam write methods use ISteamUserStats013 slots 6 and 9" {
+test "Steam notification methods use ISteamUserStats013 slots 6, 9, and 12" {
     const Fake = struct {
         var set_called = false;
         var store_called = false;
+        var progress_called = false;
 
         fn unused(_: *anyopaque) callconv(.c) u8 {
             return 0;
@@ -151,16 +159,25 @@ test "Steam write methods use ISteamUserStats013 slots 6 and 9" {
             store_called = true;
             return 1;
         }
+
+        fn progress(_: *anyopaque, name: [*:0]const u8, current: u32, maximum: u32) callconv(.c) u8 {
+            progress_called = std.mem.eql(u8, std.mem.span(name), "ACH_TEST") and current == 1 and maximum == 2;
+            return @intFromBool(progress_called);
+        }
     };
     Fake.set_called = false;
     Fake.store_called = false;
-    var methods = [_]*const anyopaque{@ptrCast(&Fake.unused)} ** 10;
+    Fake.progress_called = false;
+    var methods = [_]*const anyopaque{@ptrCast(&Fake.unused)} ** 13;
     methods[6] = @ptrCast(&Fake.set);
     methods[9] = @ptrCast(&Fake.store);
+    methods[12] = @ptrCast(&Fake.progress);
     var object: [*]const *const anyopaque = &methods;
     const stats = UserStats{ .pointer = @ptrCast(&object) };
     try std.testing.expect(stats.setAchievement("ACH_TEST"));
     try std.testing.expect(stats.storeStats());
+    try std.testing.expect(stats.indicateAchievementProgress("ACH_TEST", 1, 2));
     try std.testing.expect(Fake.set_called);
     try std.testing.expect(Fake.store_called);
+    try std.testing.expect(Fake.progress_called);
 }
