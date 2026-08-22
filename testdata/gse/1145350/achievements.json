@@ -1,0 +1,10 @@
+{
+  "ACH_OLD": {
+    "earned": true,
+    "earned_time": 1700000000
+  },
+  "ACH_NEW": {
+    "earned": false,
+    "earned_time": 0
+  }
+}

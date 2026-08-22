@@ -1,0 +1,18 @@
+[
+  {
+    "name": "ACH_OLD",
+    "displayName": "Primeiros passos",
+    "description": "Conquista usada como baseline nos testes.",
+    "hidden": "0",
+    "icon": "images/old.png",
+    "icongray": "images/old_gray.png"
+  },
+  {
+    "name": "ACH_NEW",
+    "displayName": "Ponte concluída",
+    "description": "Detecte uma mudança de estado em tempo real.",
+    "hidden": "0",
+    "icon": "images/new.png",
+    "icongray": "images/new_gray.png"
+  }
+]
