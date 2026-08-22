@@ -43,7 +43,7 @@ const RealApi = struct {
 };
 
 var real: ?RealApi = null;
-var server_thread: ?std.Thread = null;
+var server_thread: ?windows.HANDLE = null;
 var stopping: std.atomic.Value(bool) = .init(false);
 var initialized: std.atomic.Value(bool) = .init(false);
 var state_mutex: std.atomic.Mutex = .unlocked;
@@ -62,7 +62,7 @@ export fn CR_InitCloudSave(steam_path: [*:0]const u8, notify: NotifyFn) callconv
     const ok = true;
     if (ok and server_thread == null) {
         stopping.store(false, .release);
-        server_thread = std.Thread.spawn(.{}, servePipe, .{}) catch null;
+        server_thread = kernel32.CreateThread(null, 0, pipeThreadMain, null, 0, null);
     }
     initialized.store(ok, .release);
     return ok;
@@ -248,6 +248,11 @@ fn servePipe() void {
     }
 }
 
+fn pipeThreadMain(_: ?*anyopaque) callconv(.winapi) u32 {
+    servePipe();
+    return 0;
+}
+
 fn handleRequest(request: Request) Status {
     if (request.magic != protocol.protocol_magic or request.version != protocol.protocol_version) return .invalid_request;
     const command: Command = switch (request.command) {
@@ -323,7 +328,8 @@ fn stopPipeServer() void {
     stopping.store(true, .release);
     const wake = kernel32.CreateFileW(pipe_name_w, 0xC0000000, 0, null, 3, 0, null);
     if (wake != windows.INVALID_HANDLE_VALUE) _ = kernel32.CloseHandle(wake);
-    thread.join();
+    _ = kernel32.WaitForSingleObject(thread, 5000);
+    _ = kernel32.CloseHandle(thread);
     server_thread = null;
 }
 
@@ -340,4 +346,6 @@ const kernel32 = struct {
     extern "kernel32" fn FlushFileBuffers(handle: windows.HANDLE) callconv(.winapi) windows.BOOL;
     extern "kernel32" fn CloseHandle(handle: windows.HANDLE) callconv(.winapi) windows.BOOL;
     extern "kernel32" fn GetLastError() callconv(.winapi) u32;
+    extern "kernel32" fn CreateThread(security: ?*anyopaque, stack_size: usize, start: *const fn (?*anyopaque) callconv(.winapi) u32, parameter: ?*anyopaque, flags: u32, thread_id: ?*u32) callconv(.winapi) ?windows.HANDLE;
+    extern "kernel32" fn WaitForSingleObject(handle: windows.HANDLE, milliseconds: u32) callconv(.winapi) u32;
 };
