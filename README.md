@@ -2,7 +2,7 @@
 
 Bridge de conquistas Windows-only em Zig 0.16.0. Ele detecta jogos e runtimes, acompanha conquistas locais de GSE/Goldberg, Steam, Ubisoft Connect e Uplay R2-compatible, normaliza os eventos, mantém um journal resiliente e mostra notificações nativas do Windows.
 
-O acesso direto ao `ISteamUserStats` é somente leitura por padrão. A única exceção é o comando manual `steam-unlock`, que exige `--confirm-steam-write` e tenta persistir no servidor com `StoreStats`. Separadamente, a integração LuaTools sincroniza automaticamente cada evento real do provider com o cache local da Steam; esse caminho não concede nada no servidor e não pede confirmação por conquista.
+O acesso direto ao `ISteamUserStats` é somente leitura por padrão. A única exceção estável é o comando manual `steam-unlock`, que exige `--confirm-steam-write` e tenta persistir no servidor com `StoreStats`. Separadamente, a integração LuaTools sincroniza automaticamente cada evento real do provider com o cache local da Steam; esse caminho não concede nada no servidor e não pede confirmação por conquista. Uma tentativa opt-in de toast do Steam Overlay está disponível como experimento e é descrita abaixo.
 
 ## Compilar
 
@@ -114,6 +114,18 @@ Esse comando não tem confirmação manual porque não é uma tela de edição: 
 O host `achievement-bridge-cloud.dll` implementa sozinho a parte da ABI necessária às conquistas e não carrega nem depende do CloudRedirect. Isso também evita empilhar dois motores de hook dentro do `steam.exe`. O LuaTools copia o host para `<Steam>\AchievementBridge`, configura o caminho em `opensteamtool.toml` e ele passa a valer na próxima abertura da Steam. Depois dessa instalação inicial, nenhum desbloqueio fecha ou reabre a Steam.
 
 O resultado é local ao cliente Desktop, como no teste do Black Flag: a biblioteca e a UI do PC podem refletir a conquista, mas celular, perfil e servidor continuam inalterados porque esse fluxo não chama `StoreStats`.
+
+### Toast do Steam Overlay (experimental)
+
+O sync aceita uma tentativa opcional, desligada por padrão:
+
+```powershell
+achievement-bridge steam-local-sync --appid 3751950 --achievement ACObsidian_Ach_10 --timestamp 1787390253 --experimental-steam-notification
+```
+
+Somente quando o cache ainda não contém a conquista, o Bridge carrega os stats pela ABI, chama `SetAchievement` e pede `StoreStats`. Ele não espera nem afirma persistência no servidor: `native_notification=store_queued` significa apenas que a Steam aceitou o pedido na fila local, que é o ponto normalmente associado ao toast do overlay. Essa chamada pode contatar os serviços da Steam.
+
+Os demais resultados (`not_new`, `already_unlocked`, `stats_unavailable`, `set_failed`, `store_failed` ou `steam_unavailable`) são explícitos no JSON para o host usar um fallback. O LuaTools só ativa essa rota para eventos novos em tempo real e mostra seu popup próprio quando a Steam não aceita enfileirar a tentativa.
 
 ## Ubisoft Connect oficial
 
