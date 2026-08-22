@@ -20,6 +20,10 @@ pub const registry = struct {
 pub const notifications = struct {
     pub const windows = @import("notifications/windows.zig");
 };
+
+pub const local = struct {
+    pub const store = @import("local/store.zig");
+};
 pub const steam = struct {
     pub const adapter = @import("steam/adapter.zig");
     pub const client = @import("steam/client.zig");
@@ -65,6 +69,7 @@ test {
     _ = registry.manifest;
     _ = registry.cache;
     _ = notifications.windows;
+    _ = local.store;
     _ = steam.adapter;
     _ = steam.client;
     _ = steam.user_stats;
