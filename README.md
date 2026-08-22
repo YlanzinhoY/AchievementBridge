@@ -53,6 +53,29 @@ Observar mudanças mantendo uma única sessão read-only:
 zig build run -- steam-watch --appid 1145350
 ```
 
+Para consumidores como o LuaTools, o catálogo JSON combina metadata e estado do Steam Client com
+overrides estritamente locais. A Steam sempre tem prioridade quando já informa o desbloqueio:
+
+```powershell
+zig build run -- catalog --appid 1145350
+```
+
+O catálogo inclui API name, nome, descrição, hashes dos ícones normal/bloqueado, timestamp, raridade
+global e a origem do estado. Nenhuma operação desse comando escreve por `ISteamUserStats`.
+
+## Estado local explícito
+
+Uma conquista pode ser persistida apenas para interfaces locais, sem chamar `SetAchievement` nem
+`StoreStats`. O API name é validado contra o catálogo Steam e a confirmação é obrigatória:
+
+```powershell
+zig build run -- local-record --appid 1145350 --achievement AchClearErebus --confirm-local-write
+```
+
+Por padrão, o arquivo fica em `%LOCALAPPDATA%\AchievementBridge\local-achievements.json`. O override
+local nunca substitui um estado desbloqueado retornado pelo cliente Steam e não aparece no celular,
+perfil comunitário ou demais superfícies que consultam apenas os servidores Steam.
+
 ## Escrita Steam explícita
 
 Para um único desbloqueio autorizado pelo usuário:
