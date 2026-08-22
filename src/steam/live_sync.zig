@@ -56,6 +56,32 @@ pub const Result = struct {
     }
 };
 
+pub const ClearOptions = struct {
+    app_id: u32,
+    api_name: []const u8,
+    steam_root: []const u8,
+    backup_root: []const u8,
+    account_id: ?u32 = null,
+};
+
+pub const ClearResult = struct {
+    allocator: std.mem.Allocator,
+    changed: bool,
+    account_id: u32,
+    stat_id: u32,
+    bit: u5,
+    permission: i32,
+    crc: u32,
+    stats_path: []u8,
+    backup_path: ?[]u8,
+
+    pub fn deinit(self: *ClearResult) void {
+        self.allocator.free(self.stats_path);
+        if (self.backup_path) |path| self.allocator.free(path);
+        self.* = undefined;
+    }
+};
+
 /// Persists one provider unlock in Steam's native local cache and asks the
 /// in-process proxy to recapture it. Host refresh failures are reported as a
 /// status instead of rolling back the durable local state.
@@ -134,6 +160,48 @@ pub fn sync(allocator: std.mem.Allocator, io: std.Io, options: Options) !Result 
         .host_status = host_status,
         .steam_refreshed = steam_refreshed,
         .native_notification = native_notification,
+        .stats_path = stats_path,
+        .backup_path = backup_path,
+    };
+}
+
+/// Controlled local reset used to verify the unlock pipeline. The caller must
+/// require explicit confirmation and ensure Steam is stopped before entering.
+pub fn clear(allocator: std.mem.Allocator, io: std.Io, options: ClearOptions) !ClearResult {
+    if (options.app_id == 0) return error.InvalidSteamAppId;
+
+    const schema_name = try std.fmt.allocPrint(allocator, "UserGameStatsSchema_{d}.bin", .{options.app_id});
+    defer allocator.free(schema_name);
+    const schema_path = try std.fs.path.join(allocator, &.{ options.steam_root, "appcache", "stats", schema_name });
+    defer allocator.free(schema_path);
+    const schema_bytes = try std.Io.Dir.cwd().readFileAlloc(io, schema_path, allocator, .limited(64 * 1024 * 1024));
+    defer allocator.free(schema_bytes);
+    const location = try schema.findAchievement(allocator, schema_bytes, options.app_id, options.api_name);
+
+    const account_id = options.account_id orelse try steam_install.findActiveAccountId();
+    const stats_name = try std.fmt.allocPrint(allocator, "UserGameStats_{d}_{d}.bin", .{ account_id, options.app_id });
+    defer allocator.free(stats_name);
+    const stats_path = try std.fs.path.join(allocator, &.{ options.steam_root, "appcache", "stats", stats_name });
+    errdefer allocator.free(stats_path);
+    const existing = try std.Io.Dir.cwd().readFileAlloc(io, stats_path, allocator, .limited(64 * 1024 * 1024));
+    defer allocator.free(existing);
+    var mutation = try local_cache.clearAchievement(allocator, existing, location.stat_id, location.bit);
+    defer mutation.deinit(allocator);
+
+    var backup_path: ?[]u8 = null;
+    errdefer if (backup_path) |path| allocator.free(path);
+    if (mutation.changed) {
+        backup_path = try backup(allocator, io, options.backup_root, options.app_id, stats_name, existing);
+        try writeAtomic(io, stats_path, mutation.bytes);
+    }
+    return .{
+        .allocator = allocator,
+        .changed = mutation.changed,
+        .account_id = account_id,
+        .stat_id = location.stat_id,
+        .bit = location.bit,
+        .permission = location.permission,
+        .crc = mutation.crc,
         .stats_path = stats_path,
         .backup_path = backup_path,
     };

@@ -126,6 +126,80 @@ pub fn unlock(
     };
 }
 
+/// Clears one achievement bit and its unlock timestamp without removing or
+/// reordering any Binary KeyValues nodes. This is intended for controlled local
+/// tests and must only be used while Steam is stopped so its in-memory cache
+/// cannot overwrite the result.
+pub fn clearAchievement(
+    allocator: std.mem.Allocator,
+    existing: []const u8,
+    stat_id: u32,
+    bit: u5,
+) !Mutation {
+    if (existing.len == 0) return error.SteamStatsCacheNotFound;
+    var output = try std.ArrayList(u8).initCapacity(allocator, existing.len);
+    errdefer output.deinit(allocator);
+    try output.appendSlice(allocator, existing);
+
+    var stat_name_buffer: [16]u8 = undefined;
+    const stat_name = try std.fmt.bufPrint(&stat_name_buffer, "{d}", .{stat_id});
+    var bit_name_buffer: [4]u8 = undefined;
+    const bit_name = try std.fmt.bufPrint(&bit_name_buffer, "{d}", .{bit});
+    const mask = @as(u32, 1) << bit;
+    var changed = false;
+
+    {
+        var document = try bkv.parse(allocator, output.items);
+        defer document.deinit();
+        const cache = document.child("cache") orelse return error.SteamStatsCacheRootNotFound;
+        if (cache.child(stat_name)) |stat| {
+            if (stat.tag != .section) return error.InvalidSteamStatSection;
+            const data = stat.child("data") orelse return error.SteamStatDataNotFound;
+            if (data.tag != .int32 or data.value_len != 4) return error.InvalidSteamStatData;
+            const old_value: u32 = @intCast(try bkv.unsignedValue(output.items, data));
+            if ((old_value & mask) != 0) {
+                writeU32(output.items[data.value_offset..][0..4], old_value & ~mask);
+                changed = true;
+            }
+            if (stat.child("AchievementTimes")) |times| {
+                if (times.tag != .section) return error.InvalidSteamAchievementTimes;
+                if (times.child(bit_name)) |time_node| {
+                    if (time_node.tag != .int32 or time_node.value_len != 4) return error.InvalidSteamAchievementTime;
+                    const old_time: u32 = @intCast(try bkv.unsignedValue(output.items, time_node));
+                    if (old_time != 0) {
+                        writeU32(output.items[time_node.value_offset..][0..4], 0);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    var effective_crc: u32 = 0;
+    {
+        var document = try bkv.parse(allocator, output.items);
+        defer document.deinit();
+        const cache = document.child("cache") orelse return error.SteamStatsCacheRootNotFound;
+        const crc_node = cache.child("crc") orelse return error.SteamStatsCacheCrcNotFound;
+        if (crc_node.tag != .int32 or crc_node.value_len != 4) return error.InvalidSteamStatsCacheCrc;
+        effective_crc = @intCast(try bkv.unsignedValue(output.items, crc_node));
+        if (changed) {
+            const expected_crc = try computeCrc(allocator, output.items);
+            if (effective_crc != expected_crc) {
+                writeU32(output.items[crc_node.value_offset..][0..4], expected_crc);
+                effective_crc = expected_crc;
+            }
+        }
+    }
+
+    return .{
+        .bytes = try output.toOwnedSlice(allocator),
+        .changed = changed,
+        .unlock_time = 0,
+        .crc = effective_crc,
+    };
+}
+
 const CrcStat = struct {
     id: u32,
     value: u32,
@@ -222,14 +296,18 @@ fn writeU32(destination: *[4]u8, value: u32) void {
 
 test "unlock reproduces the proven Black Flag native cache" {
     const expected = &[_]u8{
-        0x00, 'c', 'a', 'c', 'h', 'e', 0x00,
-        0x02, 'c', 'r', 'c', 0x00, 0x85, 0xB6, 0x63, 0xED,
-        0x02, 'P', 'e', 'n', 'd', 'i', 'n', 'g', 'C', 'h', 'a', 'n', 'g', 'e', 's', 0x00, 0, 0, 0, 0,
-        0x00, '1', 0x00,
-        0x02, 'd', 'a', 't', 'a', 0x00, 0x00, 0x02, 0x00, 0x00,
-        0x00, 'A', 'c', 'h', 'i', 'e', 'v', 'e', 'm', 'e', 'n', 't', 'T', 'i', 'm', 'e', 's', 0x00,
-        0x02, '9', 0x00, 0x2D, 0x69, 0x89, 0x6A,
-        0x08, 0x08, 0x08, 0x08,
+        0x00, 'c',  'a',  'c',  'h',  'e',  0x00,
+        0x02, 'c',  'r',  'c',  0x00, 0x85, 0xB6,
+        0x63, 0xED, 0x02, 'P',  'e',  'n',  'd',
+        'i',  'n',  'g',  'C',  'h',  'a',  'n',
+        'g',  'e',  's',  0x00, 0,    0,    0,
+        0,    0x00, '1',  0x00, 0x02, 'd',  'a',
+        't',  'a',  0x00, 0x00, 0x02, 0x00, 0x00,
+        0x00, 'A',  'c',  'h',  'i',  'e',  'v',
+        'e',  'm',  'e',  'n',  't',  'T',  'i',
+        'm',  'e',  's',  0x00, 0x02, '9',  0x00,
+        0x2D, 0x69, 0x89, 0x6A, 0x08, 0x08, 0x08,
+        0x08,
     };
     var mutation = try unlock(std.testing.allocator, &.{}, 1, 9, 1787390253);
     defer mutation.deinit(std.testing.allocator);
@@ -276,4 +354,26 @@ test "idempotent unlock preserves Steam pending overlay crc" {
     try std.testing.expect(!second.changed);
     try std.testing.expectEqual(@as(u32, 0), second.crc);
     try std.testing.expectEqualSlices(u8, pending, second.bytes);
+}
+
+test "clear achievement removes only its bit and timestamp" {
+    var first = try unlock(std.testing.allocator, &.{}, 1, 8, 1787390000);
+    defer first.deinit(std.testing.allocator);
+    var unlocked = try unlock(std.testing.allocator, first.bytes, 1, 9, 1787390253);
+    defer unlocked.deinit(std.testing.allocator);
+    var cleared = try clearAchievement(std.testing.allocator, unlocked.bytes, 1, 9);
+    defer cleared.deinit(std.testing.allocator);
+    try std.testing.expect(cleared.changed);
+
+    var document = try bkv.parse(std.testing.allocator, cleared.bytes);
+    defer document.deinit();
+    const stat = document.child("cache").?.child("1").?;
+    try std.testing.expectEqual(@as(u64, 1 << 8), try bkv.unsignedValue(cleared.bytes, stat.child("data").?));
+    try std.testing.expectEqual(@as(u64, 1787390000), try bkv.unsignedValue(cleared.bytes, stat.child("AchievementTimes").?.child("8").?));
+    try std.testing.expectEqual(@as(u64, 0), try bkv.unsignedValue(cleared.bytes, stat.child("AchievementTimes").?.child("9").?));
+
+    var repeated = try clearAchievement(std.testing.allocator, cleared.bytes, 1, 9);
+    defer repeated.deinit(std.testing.allocator);
+    try std.testing.expect(!repeated.changed);
+    try std.testing.expectEqualSlices(u8, cleared.bytes, repeated.bytes);
 }
