@@ -27,6 +27,14 @@ Observar os roots GSE padrão com popup, som, recovery e metadata Steam automát
 zig build run -- watch
 ```
 
+O LuaTools usa `watch-all`, que mantém GSE, Ubisoft oficial e Uplay R2 em workers isolados dentro de um único processo Bridge:
+
+```powershell
+zig build run -- watch-all --no-notifications
+```
+
+Os eventos continuam num único stream ordenado; o popup rico e a sincronização local ficam sob responsabilidade do LuaTools.
+
 Observar um save customizado/portátil:
 
 ```powershell
