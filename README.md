@@ -127,6 +127,8 @@ Somente quando o cache ainda não contém a conquista, o Bridge carrega os stats
 
 Quando `SetAchievement` é recusado, a mesma tentativa pede `IndicateAchievementProgress(API_NAME, 1, 2)`. Esse método oficial não desbloqueia nem persiste nada: ele apenas solicita ao Steam Overlay um toast de progresso usando o nome e a imagem reais da conquista. `native_notification=progress_queued` indica que a Steam aceitou esse fallback.
 
+Validado manualmente no Windows com Assassin's Creed IV Black Flag (`appid=3751950`, `ACObsidian_Ach_10`, `permission=2`): a Steam recusou `SetAchievement`, aceitou `IndicateAchievementProgress`, exibiu o toast nativo `1/2` com nome e imagem localizados e o Bridge concluiu o sync local. O resultado foi reproduzido duas vezes com confirmação visual.
+
 Os demais resultados (`not_new`, `already_unlocked`, `stats_unavailable`, `set_failed`, `progress_failed`, `store_failed` ou `steam_unavailable`) são explícitos no JSON para o host usar um fallback. O LuaTools só ativa essa rota para eventos novos em tempo real e mostra seu popup próprio quando a Steam não aceita nenhuma das tentativas nativas.
 
 ## Ubisoft Connect oficial
