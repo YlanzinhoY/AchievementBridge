@@ -2,7 +2,7 @@
 
 Bridge de conquistas Windows-only em Zig 0.16.0. Ele detecta jogos e runtimes, acompanha conquistas locais de GSE/Goldberg, Steam, Ubisoft Connect e Uplay R2-compatible, normaliza os eventos, mantém um journal resiliente e mostra notificações nativas do Windows.
 
-O acesso ao Steam Client é somente leitura por padrão. A única exceção é o comando manual `steam-unlock`, que exige `--confirm-steam-write`, opera sobre uma única conquista e aguarda a confirmação de `StoreStats`. Os watchers não escrevem na Steam.
+O acesso direto ao `ISteamUserStats` é somente leitura por padrão. A única exceção é o comando manual `steam-unlock`, que exige `--confirm-steam-write` e tenta persistir no servidor com `StoreStats`. Separadamente, a integração LuaTools sincroniza automaticamente cada evento real do provider com o cache local da Steam; esse caminho não concede nada no servidor e não pede confirmação por conquista.
 
 ## Compilar
 
@@ -11,7 +11,7 @@ zig build
 zig build test
 ```
 
-O binário será criado em `zig-out/bin/achievement-bridge.exe`.
+Os artefatos serão criados em `zig-out/bin/achievement-bridge.exe` e `zig-out/bin/achievement-bridge-cloud.dll`.
 
 ## GSE / Goldberg-compatible
 
@@ -85,6 +85,27 @@ zig build run -- steam-unlock --appid 3751950 --achievement ACObsidian_Ach_10 --
 ```
 
 O comando carrega os stats atuais, valida o API name, chama `SetAchievement` e só considera a operação armazenada após o callback de `StoreStats`. A Steam recusa conquistas protegidas pelo publicador. No Black Flag Resynced, as 49 entradas do schema local têm `permission = 2`; portanto o cliente não pode concedê-las e o comando termina sem chamar `StoreStats`.
+
+## Sincronização local automática
+
+Quando o LuaTools recebe um novo evento de GSE ou Uplay/Ubisoft mapeável para um AppID, ele resolve primeiro o API name pelo catálogo Steam e chama internamente:
+
+```powershell
+achievement-bridge steam-local-sync --appid 3751950 --achievement ACObsidian_Ach_10 --timestamp 1787390253
+```
+
+Esse comando não tem confirmação manual porque não é uma tela de edição: ele é a continuação automática de um desbloqueio observado durante o jogo. A operação:
+
+- lê `UserGameStatsSchema_<appid>.bin` e resolve `stat_id`, bit e `permission`;
+- preserva todos os outros stats e campos Binary KeyValues;
+- altera somente o bit e timestamp correspondentes e recalcula o CRC nativo;
+- cria backup antes de cada mudança e substitui o arquivo de forma atômica;
+- atualiza o overlay em memória da Steam pelo host carregado no processo;
+- é idempotente, portanto repetir o mesmo evento não muda o timestamp original.
+
+O host `achievement-bridge-cloud.dll` implementa sozinho a parte da ABI necessária às conquistas e não depende do CloudRedirect estar instalado. Se a instalação já possuir `cloud_redirect.dll`, o proxy mantém compatibilidade encaminhando seus exports. O LuaTools copia o host para `<Steam>\AchievementBridge`, configura o caminho em `opensteamtool.toml` e ele passa a valer na próxima abertura da Steam. Depois dessa instalação inicial, nenhum desbloqueio fecha ou reabre a Steam.
+
+O resultado é local ao cliente Desktop, como no teste do Black Flag: a biblioteca e a UI do PC podem refletir a conquista, mas celular, perfil e servidor continuam inalterados porque esse fluxo não chama `StoreStats`.
 
 ## Ubisoft Connect oficial
 
@@ -166,6 +187,8 @@ Implementado:
 - catálogo Steam via Registry, `libraryfolders.vdf` e app manifests;
 - process watcher, `GameSession`, runtime detector, provider resolver e múltiplos providers;
 - Steam adapter read-only e watcher por polling;
+- parser Binary KeyValues, mapeamento schema→bit, CRC e escrita atômica do cache local;
+- proxy ABI standalone e IPC para refletir desbloqueios durante a sessão da Steam;
 - parser offline do spool oficial Ubisoft Connect;
 - diagnóstico e watcher de saves Uplay R2-compatible;
 - validação Ed25519 de manifest, SHA-256/assinatura de artefatos e cache atômico com rollback;
@@ -177,7 +200,6 @@ Ainda não implementado:
 - ícones no popup e screenshots automáticos;
 - mapper comunitário Ubisoft↔Steam completo;
 - download remoto do Provider Registry (o endpoint e a chave raiz ainda não foram publicados);
-- bootstrap e opções no LuaTools;
 - providers Epic/GOG/EA/Xbox além da detecção de runtime.
 
 O watcher de arquivos atual usa polling leve de metadata e só relê JSON quando tamanho ou `mtime` muda. A migração para `ReadDirectoryChangesW` continua pendente.
