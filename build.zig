@@ -27,6 +27,20 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(exe);
 
+    if (target.result.os.tag == .windows) {
+        const cloud_proxy = b.addLibrary(.{
+            .name = "achievement-bridge-cloud",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/steam/cloud_proxy.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        cloud_proxy.root_module.linkSystemLibrary("kernel32", .{});
+        b.installArtifact(cloud_proxy);
+    }
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);

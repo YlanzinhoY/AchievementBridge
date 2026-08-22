@@ -27,10 +27,14 @@ pub const local = struct {
 };
 pub const steam = struct {
     pub const adapter = @import("steam/adapter.zig");
+    pub const binary_key_values = @import("steam/binary_key_values.zig");
     pub const client = @import("steam/client.zig");
+    pub const cloud_ipc = @import("steam/cloud_ipc.zig");
+    pub const cloud_protocol = @import("steam/cloud_protocol.zig");
     pub const user_stats = @import("steam/user_stats.zig");
     pub const vtable = @import("steam/vtable.zig");
     pub const metadata = @import("steam/metadata.zig");
+    pub const schema = @import("steam/schema.zig");
 };
 pub const gse = struct {
     pub const snapshot = @import("providers/gse/snapshot.zig");
@@ -73,10 +77,14 @@ test {
     _ = notifications.windows;
     _ = local.store;
     _ = steam.adapter;
+    _ = steam.binary_key_values;
     _ = steam.client;
+    _ = steam.cloud_ipc;
+    _ = steam.cloud_protocol;
     _ = steam.user_stats;
     _ = steam.vtable;
     _ = steam.metadata;
+    _ = steam.schema;
     _ = gse.snapshot;
     _ = gse.discovery;
     _ = gse.watcher;
