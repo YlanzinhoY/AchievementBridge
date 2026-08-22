@@ -5,6 +5,8 @@ pub const AchievementState = struct {
     api_name: []u8,
     name: []u8,
     description: []u8,
+    icon: []u8,
+    icon_gray: []u8,
     unlocked: bool,
     unlock_time: i64,
     hidden: bool,
@@ -14,6 +16,8 @@ pub const AchievementState = struct {
         allocator.free(self.api_name);
         allocator.free(self.name);
         allocator.free(self.description);
+        allocator.free(self.icon);
+        allocator.free(self.icon_gray);
         self.* = undefined;
     }
 };
@@ -72,6 +76,8 @@ pub const UserStats = struct {
             const display_name = self.getDisplayAttribute(api_name_z, "name") orelse api_name;
             const description = self.getDisplayAttribute(api_name_z, "desc") orelse "";
             const hidden_text = self.getDisplayAttribute(api_name_z, "hidden") orelse "0";
+            const icon = self.getDisplayAttribute(api_name_z, "icon") orelse "";
+            const icon_gray = self.getDisplayAttribute(api_name_z, "icon_gray") orelse "";
             var global_percent: f32 = 0;
             const has_percent = self.getGlobalPercent(api_name_z, &global_percent);
 
@@ -81,10 +87,16 @@ pub const UserStats = struct {
             errdefer allocator.free(owned_name);
             const owned_description = try allocator.dupe(u8, description);
             errdefer allocator.free(owned_description);
+            const owned_icon = try allocator.dupe(u8, icon);
+            errdefer allocator.free(owned_icon);
+            const owned_icon_gray = try allocator.dupe(u8, icon_gray);
+            errdefer allocator.free(owned_icon_gray);
             try result.items.append(allocator, .{
                 .api_name = owned_api_name,
                 .name = owned_name,
                 .description = owned_description,
+                .icon = owned_icon,
+                .icon_gray = owned_icon_gray,
                 .unlocked = achieved != 0,
                 .unlock_time = unlock_time,
                 .hidden = std.mem.eql(u8, hidden_text, "1"),
