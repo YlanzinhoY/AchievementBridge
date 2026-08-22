@@ -45,14 +45,22 @@ const RealApi = struct {
 var real: ?RealApi = null;
 var server_thread: ?std.Thread = null;
 var stopping: std.atomic.Value(bool) = .init(false);
+var initialized: std.atomic.Value(bool) = .init(false);
+var state_mutex: std.atomic.Mutex = .unlocked;
+var managed_apps: [4096]u32 = undefined;
+var managed_app_count: usize = 0;
+const OverlayEntry = struct { app_id: u32, block: AchievementBlock };
+var overlays: [4096]OverlayEntry = undefined;
+var overlay_count: usize = 0;
 
 export fn CR_InitCloudSave(steam_path: [*:0]const u8, notify: NotifyFn) callconv(.c) bool {
-    if (real == null) real = loadRealApi(steam_path) catch return false;
-    const ok = real.?.init(steam_path, notify);
+    if (real == null) real = loadRealApi(steam_path) catch null;
+    const ok = if (real) |api| api.init(steam_path, notify) else true;
     if (ok and server_thread == null) {
         stopping.store(false, .release);
         server_thread = std.Thread.spawn(.{}, servePipe, .{}) catch null;
     }
+    initialized.store(ok, .release);
     return ok;
 }
 
@@ -62,16 +70,17 @@ export fn CR_HandleCloudRpc(method: [*:0]const u8, app_id: u32, account_id: u32,
 }
 
 export fn CR_AddApp(app_id: u32) callconv(.c) void {
+    addManagedApp(app_id);
     if (real) |api| if (api.add_app) |function| function(app_id);
 }
 
 export fn CR_RemoveApp(app_id: u32) callconv(.c) void {
+    removeManagedApp(app_id);
     if (real) |api| if (api.remove_app) |function| function(app_id);
 }
 
 export fn CR_IsApp(app_id: u32) callconv(.c) bool {
-    const api = real orelse return false;
-    return api.is_app(app_id);
+    return isManagedApp(app_id);
 }
 
 export fn CR_SetAccountId(account_id: u32) callconv(.c) void {
@@ -79,6 +88,16 @@ export fn CR_SetAccountId(account_id: u32) callconv(.c) void {
 }
 
 export fn CR_SetApps(app_ids: ?[*]const u32, count: u32) callconv(.c) void {
+    {
+        lockState();
+        defer state_mutex.unlock();
+        managed_app_count = 0;
+        if (app_ids) |items| {
+            const safe_count: usize = @min(count, managed_apps.len);
+            @memcpy(managed_apps[0..safe_count], items[0..safe_count]);
+            managed_app_count = safe_count;
+        }
+    }
     if (real) |api| api.set_apps(app_ids, count);
 }
 
@@ -113,11 +132,40 @@ export fn CR_GetPlaytime(app_id: u32, output: *PlaytimeInfo) callconv(.c) bool {
 }
 
 export fn CR_GetAchievements(app_id: u32, output: [*]AchievementBlock, max_blocks: u32) callconv(.c) u32 {
-    if (real) |api| if (api.get_achievements) |function| return function(app_id, output, max_blocks);
-    return 0;
+    var count: u32 = 0;
+    if (real) |api| if (api.get_achievements) |function| {
+        count = @min(function(app_id, output, max_blocks), max_blocks);
+    };
+
+    lockState();
+    defer state_mutex.unlock();
+    for (overlays[0..overlay_count]) |entry| {
+        if (entry.app_id != app_id) continue;
+        var target: ?*AchievementBlock = null;
+        for (output[0..count]) |*candidate| {
+            if (candidate.stat_id == entry.block.stat_id) {
+                target = candidate;
+                break;
+            }
+        }
+        if (target == null and count < max_blocks) {
+            output[count] = std.mem.zeroes(AchievementBlock);
+            output[count].stat_id = entry.block.stat_id;
+            target = &output[count];
+            count += 1;
+        }
+        if (target) |block| {
+            block.bits |= entry.block.bits;
+            for (entry.block.unlock_times, 0..) |timestamp, bit| {
+                if (timestamp != 0) block.unlock_times[bit] = timestamp;
+            }
+        }
+    }
+    return count;
 }
 
 export fn CR_Shutdown() callconv(.c) void {
+    initialized.store(false, .release);
     stopPipeServer();
     if (real) |api| {
         api.shutdown();
@@ -203,23 +251,67 @@ fn handleRequest(request: Request) Status {
         1 => .capture_native_stats,
         else => return .invalid_request,
     };
-    if (command == .ping) return if (real == null) .cloud_redirect_unavailable else .ok;
+    if (command == .ping) return if (initialized.load(.acquire)) .ok else .cloud_redirect_unavailable;
     if (request.app_id == 0 or request.bit >= 32) return .invalid_request;
-    const api = real orelse return .cloud_redirect_unavailable;
-    if (!api.is_app(request.app_id)) return .app_not_managed;
-    const notify = api.notify_stats_stored orelse return .cloud_redirect_unavailable;
-    const get = api.get_achievements orelse return .cloud_redirect_unavailable;
-    notify(request.app_id);
+    if (!initialized.load(.acquire)) return .cloud_redirect_unavailable;
+    if (!isManagedApp(request.app_id)) return .app_not_managed;
+    if (real) |api| if (api.notify_stats_stored) |notify| notify(request.app_id);
+    putOverlay(request.app_id, request.stat_id, @intCast(request.bit), request.unlock_time);
+    return .ok;
+}
 
-    var blocks: [64]AchievementBlock = undefined;
-    const count = @min(get(request.app_id, &blocks, blocks.len), blocks.len);
-    for (blocks[0..count]) |block| {
-        if (block.stat_id != request.stat_id) continue;
-        if ((block.bits & (@as(u32, 1) << @intCast(request.bit))) == 0) break;
-        if (block.unlock_times[request.bit] == 0) break;
-        return .ok;
+fn addManagedApp(app_id: u32) void {
+    lockState();
+    defer state_mutex.unlock();
+    for (managed_apps[0..managed_app_count]) |existing| if (existing == app_id) return;
+    if (managed_app_count == managed_apps.len) return;
+    managed_apps[managed_app_count] = app_id;
+    managed_app_count += 1;
+}
+
+fn removeManagedApp(app_id: u32) void {
+    lockState();
+    defer state_mutex.unlock();
+    for (managed_apps[0..managed_app_count], 0..) |existing, index| {
+        if (existing != app_id) continue;
+        managed_app_count -= 1;
+        managed_apps[index] = managed_apps[managed_app_count];
+        break;
     }
-    return .stats_sync_disabled;
+}
+
+fn isManagedApp(app_id: u32) bool {
+    lockState();
+    defer state_mutex.unlock();
+    for (managed_apps[0..managed_app_count]) |existing| if (existing == app_id) return true;
+    return false;
+}
+
+fn putOverlay(app_id: u32, stat_id: u32, bit: u5, unlock_time: u32) void {
+    lockState();
+    defer state_mutex.unlock();
+    var target: ?*AchievementBlock = null;
+    for (overlays[0..overlay_count]) |*entry| {
+        if (entry.app_id == app_id and entry.block.stat_id == stat_id) {
+            target = &entry.block;
+            break;
+        }
+    }
+    if (target == null) {
+        if (overlay_count == overlays.len) return;
+        overlays[overlay_count] = .{ .app_id = app_id, .block = std.mem.zeroes(AchievementBlock) };
+        overlays[overlay_count].block.stat_id = stat_id;
+        target = &overlays[overlay_count].block;
+        overlay_count += 1;
+    }
+    if (target) |block| {
+        block.bits |= @as(u32, 1) << bit;
+        block.unlock_times[bit] = unlock_time;
+    }
+}
+
+fn lockState() void {
+    while (!state_mutex.tryLock()) std.atomic.spinLoopHint();
 }
 
 fn stopPipeServer() void {
