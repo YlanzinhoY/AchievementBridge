@@ -13,6 +13,17 @@ pub const HostStatus = enum {
     rejected,
 };
 
+pub const NativeNotificationStatus = enum {
+    not_requested,
+    not_new,
+    store_queued,
+    already_unlocked,
+    steam_unavailable,
+    stats_unavailable,
+    set_failed,
+    store_failed,
+};
+
 pub const Options = struct {
     app_id: u32,
     api_name: []const u8,
@@ -20,6 +31,7 @@ pub const Options = struct {
     steam_root: []const u8,
     backup_root: []const u8,
     account_id: ?u32 = null,
+    experimental_native_notification: bool = false,
 };
 
 pub const Result = struct {
@@ -33,6 +45,7 @@ pub const Result = struct {
     crc: u32,
     host_status: HostStatus,
     steam_refreshed: bool,
+    native_notification: NativeNotificationStatus,
     stats_path: []u8,
     backup_path: ?[]u8,
 
@@ -71,6 +84,13 @@ pub fn sync(allocator: std.mem.Allocator, io: std.Io, options: Options) !Result 
     defer allocator.free(existing);
     var mutation = try local_cache.unlock(allocator, existing, location.stat_id, location.bit, options.unlock_time);
     defer mutation.deinit(allocator);
+
+    const native_notification: NativeNotificationStatus = if (!options.experimental_native_notification)
+        .not_requested
+    else if (!mutation.changed)
+        .not_new
+    else
+        tryNativeNotification(allocator, io, options.app_id, options.api_name, options.steam_root);
 
     var backup_path: ?[]u8 = null;
     errdefer if (backup_path) |path| allocator.free(path);
@@ -113,8 +133,34 @@ pub fn sync(allocator: std.mem.Allocator, io: std.Io, options: Options) !Result 
         .crc = mutation.crc,
         .host_status = host_status,
         .steam_refreshed = steam_refreshed,
+        .native_notification = native_notification,
         .stats_path = stats_path,
         .backup_path = backup_path,
+    };
+}
+
+fn tryNativeNotification(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    app_id: u32,
+    api_name: []const u8,
+    steam_root: []const u8,
+) NativeNotificationStatus {
+    var session = adapter.connect(allocator, app_id, steam_root) catch return .steam_unavailable;
+    defer session.close();
+    const queued = adapter.queueAchievementNotification(&session, allocator, io, api_name) catch |err| return switch (err) {
+        error.UserStatsRequestFailed,
+        error.UserStatsRequestRejected,
+        error.UserStatsCallbackTimeout,
+        error.GetAchievementFailed,
+        => .stats_unavailable,
+        error.SetAchievementFailed => .set_failed,
+        error.StoreStatsFailed => .store_failed,
+        else => .steam_unavailable,
+    };
+    return switch (queued) {
+        .already_unlocked => .already_unlocked,
+        .store_queued => .store_queued,
     };
 }
 
