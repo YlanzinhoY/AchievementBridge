@@ -24,6 +24,7 @@ const Cli = struct {
     wait_for_game: bool = false,
     confirm_steam_write: bool = false,
     confirm_local_write: bool = false,
+    experimental_steam_notification: bool = false,
     local_store_path: ?[]const u8 = null,
 };
 
@@ -235,6 +236,7 @@ pub fn main(init: std.process.Init) !void {
             .unlock_time = timestamp,
             .steam_root = steam_root,
             .backup_root = backup_root,
+            .experimental_native_notification = cli.experimental_steam_notification,
         });
         defer result.deinit();
         const json = try std.json.Stringify.valueAlloc(allocator, .{
@@ -249,6 +251,7 @@ pub fn main(init: std.process.Init) !void {
             .crc = result.crc,
             .host_status = @tagName(result.host_status),
             .steam_refreshed = result.steam_refreshed,
+            .native_notification = @tagName(result.native_notification),
             .stats_path = result.stats_path,
             .backup_path = result.backup_path,
         }, .{});
@@ -533,6 +536,8 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli {
             cli.confirm_steam_write = true;
         } else if (std.mem.eql(u8, arg, "--confirm-local-write")) {
             cli.confirm_local_write = true;
+        } else if (std.mem.eql(u8, arg, "--experimental-steam-notification")) {
+            cli.experimental_steam_notification = true;
         } else if (std.mem.eql(u8, arg, "--local-store")) {
             index += 1;
             if (index >= args.len) return error.MissingOptionValue;
@@ -611,7 +616,7 @@ fn printHelp() void {
         \\  achievement-bridge local-record --appid ID --achievement API_NAME --confirm-local-write
         \\  achievement-bridge steam-read --appid ID [--steam-root PATH]
         \\  achievement-bridge steam-unlock --appid ID --achievement API_NAME --confirm-steam-write
-        \\  achievement-bridge steam-local-sync --appid ID --achievement API_NAME [--timestamp UNIX]
+        \\  achievement-bridge steam-local-sync --appid ID --achievement API_NAME [--timestamp UNIX] [--experimental-steam-notification]
         \\  achievement-bridge steam-watch --appid ID [--steam-root PATH]
         \\  achievement-bridge ubisoft-scan [--root SPOOL_PATH]
         \\  achievement-bridge ubisoft-watch [--root SPOOL_PATH]
@@ -637,6 +642,7 @@ fn printHelp() void {
         \\  --wait-for-game    Aguardar um processo do diretorio do jogo antes da previa
         \\  --confirm-steam-write Confirmacao obrigatoria para alterar conquistas da conta Steam
         \\  --confirm-local-write Confirmacao obrigatoria para persistir somente no store local
+        \\  --experimental-steam-notification Tentar o toast do Steam Overlay via StoreStats (experimental)
         \\  --local-store PATH Sobrescrever o arquivo JSON de conquistas locais
         \\  --language LANG    Idioma do metadata local (padrao: brazilian)
         \\  --appid ID         Steam AppID para operacoes somente leitura
@@ -753,4 +759,21 @@ test "parse CLI roots and interval" {
     try std.testing.expectEqual(Command.watch, cli.command);
     try std.testing.expectEqual(@as(u32, 750), cli.interval_ms);
     try std.testing.expectEqualStrings("X:/saves", cli.roots.items[0]);
+}
+
+test "parse experimental Steam notification opt-in" {
+    const allocator = std.testing.allocator;
+    var cli = try parseArgs(allocator, &.{
+        "achievement-bridge",
+        "steam-local-sync",
+        "--appid",
+        "3751950",
+        "--achievement",
+        "ACObsidian_Ach_10",
+        "--experimental-steam-notification",
+    });
+    defer cli.roots.deinit(allocator);
+    defer cli.schema_paths.deinit(allocator);
+    try std.testing.expectEqual(Command.steam_local_sync, cli.command);
+    try std.testing.expect(cli.experimental_steam_notification);
 }
