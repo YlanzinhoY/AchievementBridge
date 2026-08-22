@@ -128,6 +128,37 @@ pub fn findSteamRoot(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     return error.SteamNotFound;
 }
 
+/// Returns Steam's currently signed-in 32-bit account id. The native stats
+/// filename uses this value rather than the full 64-bit SteamID.
+pub fn findActiveAccountId() !u32 {
+    if (builtin.os.tag != .windows) return error.UnsupportedOperatingSystem;
+    const windows = std.os.windows;
+    const advapi32 = struct {
+        extern "advapi32" fn RegGetValueW(
+            hkey: windows.HKEY,
+            sub_key: [*:0]const u16,
+            value: [*:0]const u16,
+            flags: u32,
+            value_type: ?*u32,
+            data: ?*anyopaque,
+            data_size: *u32,
+        ) callconv(.winapi) windows.LSTATUS;
+    };
+    var account_id: u32 = 0;
+    var byte_count: u32 = @sizeOf(u32);
+    const status = advapi32.RegGetValueW(
+        windows.HKEY_CURRENT_USER,
+        std.unicode.utf8ToUtf16LeStringLiteral("Software\\Valve\\Steam\\ActiveProcess"),
+        std.unicode.utf8ToUtf16LeStringLiteral("ActiveUser"),
+        0x00000010, // RRF_RT_REG_DWORD
+        null,
+        &account_id,
+        &byte_count,
+    );
+    if (status != 0 or byte_count != @sizeOf(u32) or account_id == 0) return error.SteamUserNotActive;
+    return account_id;
+}
+
 fn readRegistrySteamPath(allocator: std.mem.Allocator) ![]u8 {
     const windows = std.os.windows;
     const advapi32 = struct {
