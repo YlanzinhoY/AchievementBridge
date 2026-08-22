@@ -54,12 +54,11 @@ var overlays: [4096]OverlayEntry = undefined;
 var overlay_count: usize = 0;
 
 export fn CR_InitCloudSave(steam_path: [*:0]const u8, notify: NotifyFn) callconv(.c) bool {
-    // Achievement Bridge deliberately runs as a standalone host. Loading a
-    // second hook engine here would stack CloudRedirect's steamclient hooks on
-    // top of OpenSteamTool's hooks and can recurse during client startup.
-    _ = steam_path;
-    _ = notify;
-    const ok = true;
+    // OpenSteamTool accepts a single cloud library. When CloudRedirect is
+    // installed, chain-load it and keep forwarding its ABI so save redirection
+    // and Achievement Bridge can coexist in the same Steam session.
+    if (real == null) real = loadRealApi(steam_path) catch null;
+    const ok = if (real) |api| api.init(steam_path, notify) else true;
     if (ok and server_thread == null) {
         stopping.store(false, .release);
         server_thread = kernel32.CreateThread(null, 0, pipeThreadMain, null, 0, null);
