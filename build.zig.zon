@@ -1,0 +1,15 @@
+.{
+    .name = .achievement_bridge,
+    .version = "0.1.0",
+    .fingerprint = 0x8e6f4202fcd911b5,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+        "LICENSE",
+        "REFERENCES.md",
+    },
+}
