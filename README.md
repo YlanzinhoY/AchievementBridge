@@ -111,7 +111,7 @@ Esse comando não tem confirmação manual porque não é uma tela de edição: 
 - atualiza o overlay em memória da Steam pelo host carregado no processo;
 - é idempotente, portanto repetir o mesmo evento não muda o timestamp original.
 
-O host `achievement-bridge-cloud.dll` implementa sozinho a parte da ABI necessária às conquistas e não carrega nem depende do CloudRedirect. Isso também evita empilhar dois motores de hook dentro do `steam.exe`. O LuaTools copia o host para `<Steam>\AchievementBridge`, configura o caminho em `opensteamtool.toml` e ele passa a valer na próxima abertura da Steam. Depois dessa instalação inicial, nenhum desbloqueio fecha ou reabre a Steam.
+O OpenSteamTool aceita uma única biblioteca em `[cloud].library`. Por isso, o host `achievement-bridge-cloud.dll` funciona como proxy: quando encontra `<Steam>\cloud_redirect.dll`, ele carrega a instalação existente e encaminha toda a ABI para preservar redirecionamento, sincronização e gravação dos saves; sem o CloudRedirect, continua oferecendo sozinho a parte necessária às conquistas. O LuaTools copia o host para `<Steam>\AchievementBridge`, configura o caminho em `opensteamtool.toml` e ele passa a valer na próxima abertura da Steam. Depois dessa instalação inicial, nenhum desbloqueio fecha ou reabre a Steam.
 
 O resultado é local ao cliente Desktop, como no teste do Black Flag: a biblioteca e a UI do PC podem refletir a conquista, mas celular, perfil e servidor continuam inalterados porque esse fluxo não chama `StoreStats`.
 
@@ -212,7 +212,7 @@ Implementado:
 - process watcher, `GameSession`, runtime detector, provider resolver e múltiplos providers;
 - Steam adapter read-only e watcher por polling;
 - parser Binary KeyValues, mapeamento schema→bit, CRC e escrita atômica do cache local;
-- proxy ABI standalone e IPC para refletir desbloqueios durante a sessão da Steam;
+- proxy ABI compatível com CloudRedirect e IPC para refletir desbloqueios durante a sessão da Steam;
 - parser offline do spool oficial Ubisoft Connect;
 - diagnóstico e watcher de saves Uplay R2-compatible;
 - validação Ed25519 de manifest, SHA-256/assinatura de artefatos e cache atômico com rollback;

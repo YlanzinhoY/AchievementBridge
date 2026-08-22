@@ -67,7 +67,7 @@ Componentes relevantes:
 - `src/steam/live_sync.zig`: backup, escrita atômica, captura pelo host e tentativa de popup.
 - `src/steam/user_stats.zig`: ABI `ISteamUserStats013`.
 - `src/steam/adapter.zig`: leitura, unlock normal e fallback de progresso.
-- `src/steam/cloud_proxy.zig`: proxy/host autônomo carregado pela Steam.
+- `src/steam/cloud_proxy.zig`: proxy/host carregado pela Steam; encadeia o `cloud_redirect.dll` existente para preservar os saves e funciona sozinho quando ele não está instalado.
 - `src/main.zig`: CLI e watchers.
 - `external/LuaTools/src/LuaToolsGui/Services/AchievementBridgeService.cs`: ciclo de vida, eventos e escolha de popup.
 - `external/LuaTools/src/LuaToolsGui/Services/AchievementBridgeSetupService.cs`: instalação/configuração do host.
@@ -300,4 +300,3 @@ Há commits anteriores para catálogo, popup com imagem, traduções, settings e
 - `opensteamtool.toml` já contém o host do AchievementBridge habilitado.
 - Nenhuma conquista do Duskfade foi alterada.
 - As worktrees estavam limpas antes da criação deste documento.
-
