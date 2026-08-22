@@ -54,8 +54,12 @@ var overlays: [4096]OverlayEntry = undefined;
 var overlay_count: usize = 0;
 
 export fn CR_InitCloudSave(steam_path: [*:0]const u8, notify: NotifyFn) callconv(.c) bool {
-    if (real == null) real = loadRealApi(steam_path) catch null;
-    const ok = if (real) |api| api.init(steam_path, notify) else true;
+    // Achievement Bridge deliberately runs as a standalone host. Loading a
+    // second hook engine here would stack CloudRedirect's steamclient hooks on
+    // top of OpenSteamTool's hooks and can recurse during client startup.
+    _ = steam_path;
+    _ = notify;
+    const ok = true;
     if (ok and server_thread == null) {
         stopping.store(false, .release);
         server_thread = std.Thread.spawn(.{}, servePipe, .{}) catch null;
