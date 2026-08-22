@@ -98,7 +98,8 @@ pub fn unlock(
         }
     }
 
-    const crc = try computeCrc(allocator, output.items);
+    const expected_crc = try computeCrc(allocator, output.items);
+    var effective_crc = expected_crc;
     {
         var document = try bkv.parse(allocator, output.items);
         defer document.deinit();
@@ -106,9 +107,14 @@ pub fn unlock(
         const crc_node = cache.child("crc") orelse return error.SteamStatsCacheCrcNotFound;
         if (crc_node.tag != .int32 or crc_node.value_len != 4) return error.InvalidSteamStatsCacheCrc;
         const old_crc: u32 = @intCast(try bkv.unsignedValue(output.items, crc_node));
-        if (old_crc != crc) {
-            writeU32(output.items[crc_node.value_offset..][0..4], crc);
-            changed = true;
+        effective_crc = old_crc;
+        // Steam may deliberately keep crc=0 while PendingChanges/state mark an
+        // in-memory local overlay. Repair the CRC only when this call actually
+        // changes the target achievement; otherwise an idempotent event must be
+        // a byte-for-byte no-op.
+        if (changed and old_crc != expected_crc) {
+            writeU32(output.items[crc_node.value_offset..][0..4], expected_crc);
+            effective_crc = expected_crc;
         }
     }
 
@@ -116,7 +122,7 @@ pub fn unlock(
         .bytes = try output.toOwnedSlice(allocator),
         .changed = changed,
         .unlock_time = unlock_time,
-        .crc = crc,
+        .crc = effective_crc,
     };
 }
 
@@ -252,4 +258,22 @@ test "unlock is idempotent and preserves unknown fields" {
     defer third.deinit(std.testing.allocator);
     try std.testing.expect(!third.changed);
     try std.testing.expectEqualSlices(u8, second.bytes, third.bytes);
+}
+
+test "idempotent unlock preserves Steam pending overlay crc" {
+    var first = try unlock(std.testing.allocator, &.{}, 1, 9, 1787390253);
+    defer first.deinit(std.testing.allocator);
+    var pending = try std.testing.allocator.dupe(u8, first.bytes);
+    defer std.testing.allocator.free(pending);
+    var document = try bkv.parse(std.testing.allocator, pending);
+    defer document.deinit();
+    const cache = document.child("cache").?;
+    writeU32(pending[cache.child("crc").?.value_offset..][0..4], 0);
+    writeU32(pending[cache.child("PendingChanges").?.value_offset..][0..4], 1);
+
+    var second = try unlock(std.testing.allocator, pending, 1, 9, 2000000000);
+    defer second.deinit(std.testing.allocator);
+    try std.testing.expect(!second.changed);
+    try std.testing.expectEqual(@as(u32, 0), second.crc);
+    try std.testing.expectEqualSlices(u8, pending, second.bytes);
 }
