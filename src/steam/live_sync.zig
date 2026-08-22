@@ -97,7 +97,8 @@ pub fn sync(allocator: std.mem.Allocator, io: std.Io, options: Options) !Result 
     defer allocator.free(schema_bytes);
     const location = try schema.findAchievement(allocator, schema_bytes, options.app_id, options.api_name);
 
-    const account_id = options.account_id orelse try steam_install.findActiveAccountId();
+    const account_id = options.account_id orelse (steam_install.findActiveAccountId() catch
+        try findStatsAccountId(allocator, io, options.steam_root, options.app_id));
     const stats_name = try std.fmt.allocPrint(allocator, "UserGameStats_{d}_{d}.bin", .{ account_id, options.app_id });
     defer allocator.free(stats_name);
     const stats_path = try std.fs.path.join(allocator, &.{ options.steam_root, "appcache", "stats", stats_name });
@@ -178,7 +179,8 @@ pub fn clear(allocator: std.mem.Allocator, io: std.Io, options: ClearOptions) !C
     defer allocator.free(schema_bytes);
     const location = try schema.findAchievement(allocator, schema_bytes, options.app_id, options.api_name);
 
-    const account_id = options.account_id orelse try steam_install.findActiveAccountId();
+    const account_id = options.account_id orelse (steam_install.findActiveAccountId() catch
+        try findStatsAccountId(allocator, io, options.steam_root, options.app_id));
     const stats_name = try std.fmt.allocPrint(allocator, "UserGameStats_{d}_{d}.bin", .{ account_id, options.app_id });
     defer allocator.free(stats_name);
     const stats_path = try std.fs.path.join(allocator, &.{ options.steam_root, "appcache", "stats", stats_name });
@@ -232,6 +234,33 @@ fn tryNativeNotification(
     };
 }
 
+fn findStatsAccountId(allocator: std.mem.Allocator, io: std.Io, steam_root: []const u8, app_id: u32) !u32 {
+    const stats_root = try std.fs.path.join(allocator, &.{ steam_root, "appcache", "stats" });
+    defer allocator.free(stats_root);
+    var directory = try std.Io.Dir.cwd().openDir(io, stats_root, .{ .iterate = true });
+    defer directory.close(io);
+    var iterator = directory.iterate();
+    var found: ?u32 = null;
+    while (try iterator.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        const candidate = parseStatsAccountId(entry.name, app_id) orelse continue;
+        if (found != null and found.? != candidate) return error.SteamStatsAccountAmbiguous;
+        found = candidate;
+    }
+    return found orelse error.SteamStatsCacheNotFound;
+}
+
+fn parseStatsAccountId(filename: []const u8, app_id: u32) ?u32 {
+    const prefix = "UserGameStats_";
+    if (!std.mem.startsWith(u8, filename, prefix)) return null;
+    var suffix_buffer: [32]u8 = undefined;
+    const suffix = std.fmt.bufPrint(&suffix_buffer, "_{d}.bin", .{app_id}) catch return null;
+    if (!std.mem.endsWith(u8, filename, suffix)) return null;
+    const account_text = filename[prefix.len .. filename.len - suffix.len];
+    if (account_text.len == 0) return null;
+    return std.fmt.parseInt(u32, account_text, 10) catch null;
+}
+
 fn backup(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -262,4 +291,10 @@ fn writeAtomic(io: std.Io, path: []const u8, bytes: []const u8) !void {
     defer atomic.deinit(io);
     try atomic.file.writePositionalAll(io, bytes, 0);
     try atomic.replace(io);
+}
+
+test "parse native stats account id" {
+    try std.testing.expectEqual(@as(?u32, 1208830004), parseStatsAccountId("UserGameStats_1208830004_3751950.bin", 3751950));
+    try std.testing.expectEqual(@as(?u32, null), parseStatsAccountId("UserGameStatsSchema_3751950.bin", 3751950));
+    try std.testing.expectEqual(@as(?u32, null), parseStatsAccountId("UserGameStats_1208830004_2749950.bin", 3751950));
 }
