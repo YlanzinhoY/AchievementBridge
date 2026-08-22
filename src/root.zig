@@ -32,6 +32,7 @@ pub const steam = struct {
     pub const cloud_ipc = @import("steam/cloud_ipc.zig");
     pub const cloud_protocol = @import("steam/cloud_protocol.zig");
     pub const local_cache = @import("steam/local_cache.zig");
+    pub const live_sync = @import("steam/live_sync.zig");
     pub const user_stats = @import("steam/user_stats.zig");
     pub const vtable = @import("steam/vtable.zig");
     pub const metadata = @import("steam/metadata.zig");
@@ -83,6 +84,7 @@ test {
     _ = steam.cloud_ipc;
     _ = steam.cloud_protocol;
     _ = steam.local_cache;
+    _ = steam.live_sync;
     _ = steam.user_stats;
     _ = steam.vtable;
     _ = steam.metadata;
