@@ -46,12 +46,29 @@ var real: ?RealApi = null;
 var server_thread: ?windows.HANDLE = null;
 var stopping: std.atomic.Value(bool) = .init(false);
 var initialized: std.atomic.Value(bool) = .init(false);
+var current_account_id: std.atomic.Value(u32) = .init(0);
 var state_mutex: std.atomic.Mutex = .unlocked;
 var managed_apps: [4096]u32 = undefined;
 var managed_app_count: usize = 0;
-const OverlayEntry = struct { app_id: u32, block: AchievementBlock };
+const OverlayEntry = struct { account_id: u32, app_id: u32, block: AchievementBlock };
 var overlays: [4096]OverlayEntry = undefined;
 var overlay_count: usize = 0;
+var overlay_path_w: [32768]u16 = @splat(0);
+var overlay_path_len: usize = 0;
+
+const overlay_file_magic: u32 = 0x564F_4241; // "ABOV"
+const overlay_file_version: u32 = 1;
+const OverlayFileHeader = extern struct {
+    magic: u32 = overlay_file_magic,
+    version: u32 = overlay_file_version,
+    count: u32,
+    crc: u32,
+};
+const PersistentOverlayEntry = extern struct {
+    account_id: u32,
+    app_id: u32,
+    block: AchievementBlock,
+};
 
 export fn CR_InitCloudSave(steam_path: [*:0]const u8, notify: NotifyFn) callconv(.c) bool {
     // OpenSteamTool accepts a single cloud library. When CloudRedirect is
@@ -59,6 +76,8 @@ export fn CR_InitCloudSave(steam_path: [*:0]const u8, notify: NotifyFn) callconv
     // and Achievement Bridge can coexist in the same Steam session.
     if (real == null) real = loadRealApi(steam_path) catch null;
     const ok = if (real) |api| api.init(steam_path, notify) else true;
+    configureOverlayPath(steam_path);
+    loadOverlays();
     if (ok and server_thread == null) {
         stopping.store(false, .release);
         server_thread = kernel32.CreateThread(null, 0, pipeThreadMain, null, 0, null);
@@ -87,6 +106,7 @@ export fn CR_IsApp(app_id: u32) callconv(.c) bool {
 }
 
 export fn CR_SetAccountId(account_id: u32) callconv(.c) void {
+    current_account_id.store(account_id, .release);
     if (real) |api| if (api.set_account_id) |function| function(account_id);
 }
 
@@ -142,8 +162,9 @@ export fn CR_GetAchievements(app_id: u32, output: [*]AchievementBlock, max_block
 
     lockState();
     defer state_mutex.unlock();
+    const account_id = current_account_id.load(.acquire);
     for (overlays[0..overlay_count]) |entry| {
-        if (entry.app_id != app_id) continue;
+        if (entry.app_id != app_id or (entry.account_id != 0 and account_id != 0 and entry.account_id != account_id)) continue;
         var target: ?*AchievementBlock = null;
         for (output[0..count]) |*candidate| {
             if (candidate.stat_id == entry.block.stat_id) {
@@ -169,6 +190,7 @@ export fn CR_GetAchievements(app_id: u32, output: [*]AchievementBlock, max_block
 
 export fn CR_Shutdown() callconv(.c) void {
     initialized.store(false, .release);
+    persistOverlays();
     stopPipeServer();
     if (real) |api| {
         api.shutdown();
@@ -262,6 +284,7 @@ fn handleRequest(request: Request) Status {
     if (command == .ping) return if (initialized.load(.acquire)) .ok else .cloud_redirect_unavailable;
     if (request.app_id == 0 or request.bit >= 32) return .invalid_request;
     if (!initialized.load(.acquire)) return .cloud_redirect_unavailable;
+    if (current_account_id.load(.acquire) == 0) return .invalid_request;
     if (!isManagedApp(request.app_id)) return .app_not_managed;
     if (real) |api| if (api.notify_stats_stored) |notify| notify(request.app_id);
     putOverlay(request.app_id, request.stat_id, @intCast(request.bit), request.unlock_time);
@@ -296,26 +319,131 @@ fn isManagedApp(app_id: u32) bool {
 }
 
 fn putOverlay(app_id: u32, stat_id: u32, bit: u5, unlock_time: u32) void {
-    lockState();
-    defer state_mutex.unlock();
-    var target: ?*AchievementBlock = null;
-    for (overlays[0..overlay_count]) |*entry| {
-        if (entry.app_id == app_id and entry.block.stat_id == stat_id) {
-            target = &entry.block;
-            break;
+    {
+        lockState();
+        defer state_mutex.unlock();
+        const account_id = current_account_id.load(.acquire);
+        var target: ?*AchievementBlock = null;
+        for (overlays[0..overlay_count]) |*entry| {
+            if (entry.account_id == account_id and entry.app_id == app_id and entry.block.stat_id == stat_id) {
+                target = &entry.block;
+                break;
+            }
+        }
+        if (target == null) {
+            if (overlay_count == overlays.len) return;
+            overlays[overlay_count] = .{ .account_id = account_id, .app_id = app_id, .block = std.mem.zeroes(AchievementBlock) };
+            overlays[overlay_count].block.stat_id = stat_id;
+            target = &overlays[overlay_count].block;
+            overlay_count += 1;
+        }
+        if (target) |block| {
+            block.bits |= @as(u32, 1) << bit;
+            block.unlock_times[bit] = unlock_time;
         }
     }
-    if (target == null) {
-        if (overlay_count == overlays.len) return;
-        overlays[overlay_count] = .{ .app_id = app_id, .block = std.mem.zeroes(AchievementBlock) };
-        overlays[overlay_count].block.stat_id = stat_id;
-        target = &overlays[overlay_count].block;
-        overlay_count += 1;
+    persistOverlays();
+}
+
+fn configureOverlayPath(steam_path_z: [*:0]const u8) void {
+    const allocator = std.heap.page_allocator;
+    const steam_path = std.mem.span(steam_path_z);
+    const separator = if (steam_path.len > 0 and (steam_path[steam_path.len - 1] == '\\' or steam_path[steam_path.len - 1] == '/')) "" else "\\";
+    const path = std.fmt.allocPrint(allocator, "{s}{s}AchievementBridge\\achievement-overlays-v1.bin", .{ steam_path, separator }) catch return;
+    defer allocator.free(path);
+    const wide = std.unicode.wtf8ToWtf16LeAllocZ(allocator, path) catch return;
+    defer allocator.free(wide);
+    if (wide.len >= overlay_path_w.len) return;
+    @memcpy(overlay_path_w[0..wide.len], wide[0..wide.len]);
+    overlay_path_w[wide.len] = 0;
+    overlay_path_len = wide.len;
+}
+
+fn loadOverlays() void {
+    const path = overlayPath() orelse return;
+    const file = kernel32.CreateFileW(path, 0x80000000, 0x00000007, null, 3, 0x80, null);
+    if (file == windows.INVALID_HANDLE_VALUE) return;
+    defer _ = kernel32.CloseHandle(file);
+
+    var header: OverlayFileHeader = undefined;
+    if (!readExact(file, std.mem.asBytes(&header))) return;
+    if (header.magic != overlay_file_magic or header.version != overlay_file_version or header.count > overlays.len) return;
+    const allocator = std.heap.page_allocator;
+    const entries = allocator.alloc(PersistentOverlayEntry, header.count) catch return;
+    defer allocator.free(entries);
+    const bytes = std.mem.sliceAsBytes(entries);
+    if (!readExact(file, bytes) or std.hash.Crc32.hash(bytes) != header.crc) return;
+
+    lockState();
+    defer state_mutex.unlock();
+    overlay_count = entries.len;
+    for (entries, 0..) |entry, index| overlays[index] = .{
+        .account_id = entry.account_id,
+        .app_id = entry.app_id,
+        .block = entry.block,
+    };
+}
+
+fn persistOverlays() void {
+    const path = overlayPath() orelse return;
+    const allocator = std.heap.page_allocator;
+    lockState();
+    const entries = allocator.alloc(PersistentOverlayEntry, overlay_count) catch {
+        state_mutex.unlock();
+        return;
+    };
+    for (overlays[0..overlay_count], 0..) |entry, index| entries[index] = .{
+        .account_id = entry.account_id,
+        .app_id = entry.app_id,
+        .block = entry.block,
+    };
+    state_mutex.unlock();
+    defer allocator.free(entries);
+
+    const bytes = std.mem.sliceAsBytes(entries);
+    const header = OverlayFileHeader{ .count = @intCast(entries.len), .crc = std.hash.Crc32.hash(bytes) };
+    var temporary: [32768]u16 = @splat(0);
+    if (overlay_path_len + 4 >= temporary.len) return;
+    @memcpy(temporary[0..overlay_path_len], overlay_path_w[0..overlay_path_len]);
+    @memcpy(temporary[overlay_path_len..][0..4], std.unicode.utf8ToUtf16LeStringLiteral(".tmp"));
+    const temporary_path = temporary[0 .. overlay_path_len + 4 :0].ptr;
+    const file = kernel32.CreateFileW(temporary_path, 0x40000000, 0, null, 2, 0x80, null);
+    if (file == windows.INVALID_HANDLE_VALUE) return;
+    var complete = writeAll(file, std.mem.asBytes(&header)) and writeAll(file, bytes);
+    if (complete) complete = kernel32.FlushFileBuffers(file).toBool();
+    _ = kernel32.CloseHandle(file);
+    if (!complete) {
+        _ = kernel32.DeleteFileW(temporary_path);
+        return;
     }
-    if (target) |block| {
-        block.bits |= @as(u32, 1) << bit;
-        block.unlock_times[bit] = unlock_time;
+    if (!kernel32.MoveFileExW(temporary_path, path, 0x00000009).toBool()) _ = kernel32.DeleteFileW(temporary_path);
+}
+
+fn overlayPath() ?[*:0]const u16 {
+    if (overlay_path_len == 0) return null;
+    return overlay_path_w[0..overlay_path_len :0].ptr;
+}
+
+fn readExact(file: windows.HANDLE, bytes: []u8) bool {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        var count: u32 = 0;
+        const remaining: u32 = @intCast(@min(bytes.len - offset, std.math.maxInt(u32)));
+        if (!kernel32.ReadFile(file, bytes[offset..].ptr, remaining, &count, null).toBool() or count == 0) return false;
+        offset += count;
     }
+    return true;
+}
+
+fn writeAll(file: windows.HANDLE, bytes: []const u8) bool {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        var count: u32 = 0;
+        const remaining: u32 = @intCast(@min(bytes.len - offset, std.math.maxInt(u32)));
+        if (!kernel32.WriteFile(file, bytes[offset..].ptr, remaining, &count, null).toBool() or count == 0) return false;
+        offset += count;
+    }
+    return true;
 }
 
 fn lockState() void {
@@ -343,6 +471,8 @@ const kernel32 = struct {
     extern "kernel32" fn ReadFile(handle: windows.HANDLE, buffer: *anyopaque, count: u32, read: *u32, overlapped: ?*anyopaque) callconv(.winapi) windows.BOOL;
     extern "kernel32" fn WriteFile(handle: windows.HANDLE, buffer: *const anyopaque, count: u32, written: *u32, overlapped: ?*anyopaque) callconv(.winapi) windows.BOOL;
     extern "kernel32" fn FlushFileBuffers(handle: windows.HANDLE) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn DeleteFileW(path: [*:0]const u16) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn MoveFileExW(existing: [*:0]const u16, replacement: [*:0]const u16, flags: u32) callconv(.winapi) windows.BOOL;
     extern "kernel32" fn CloseHandle(handle: windows.HANDLE) callconv(.winapi) windows.BOOL;
     extern "kernel32" fn GetLastError() callconv(.winapi) u32;
     extern "kernel32" fn CreateThread(security: ?*anyopaque, stack_size: usize, start: *const fn (?*anyopaque) callconv(.winapi) u32, parameter: ?*anyopaque, flags: u32, thread_id: ?*u32) callconv(.winapi) ?windows.HANDLE;
