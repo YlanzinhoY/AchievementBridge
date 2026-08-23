@@ -7,6 +7,7 @@ const WindowsNotifier = @import("../../notifications/windows.zig").Notifier;
 const MetadataCatalog = @import("../../core/metadata.zig").Catalog;
 const steam_metadata = @import("../../steam/metadata.zig");
 const mapper = @import("../../core/mapper.zig");
+const replay_guard = @import("replay_guard.zig");
 
 pub const Options = struct {
     roots: []const []const u8,
@@ -16,6 +17,7 @@ pub const Options = struct {
     notifications: bool = true,
     steam_app_id: ?u32 = null,
     steam_root: ?[]const u8 = null,
+    replay_guard_path: ?[]const u8 = null,
 };
 
 const Tracked = struct {
@@ -48,6 +50,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     defer journal.deinit();
     var notifier: ?WindowsNotifier = if (options.notifications) WindowsNotifier.init() catch null else null;
     defer if (notifier) |*active| active.deinit();
+    var guard: ?replay_guard.Guard = if (options.replay_guard_path) |path|
+        try replay_guard.Guard.init(allocator, io, path)
+    else
+        null;
+    defer if (guard) |*active| active.deinit();
     var tracked: std.ArrayList(Tracked) = .empty;
     defer {
         for (tracked.items) |*item| item.deinit(allocator);
@@ -70,7 +77,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 if (item.mtime_ns == stat.mtime.nanoseconds and item.size == stat.size) continue;
                 var current = readSnapshot(allocator, io, candidate.state_file) catch continue;
                 errdefer current.deinit();
-                try emitNew(allocator, io, &journal, &notifier, candidate.app_id, &item.state, &current, false, options.steam_app_id, &metadata);
+                try emitNew(allocator, io, &journal, &notifier, &guard, candidate.app_id, candidate.state_file, &item.state, &current, false, options.steam_app_id, &metadata);
                 item.state.deinit();
                 item.state = current;
                 item.mtime_ns = stat.mtime.nanoseconds;
@@ -86,7 +93,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             } else if (options.recover) {
                 var empty = snapshot.Snapshot.init(allocator);
                 defer empty.deinit();
-                try emitNew(allocator, io, &journal, &notifier, candidate.app_id, &empty, &current, true, options.steam_app_id, &metadata);
+                try emitNew(allocator, io, &journal, &notifier, &guard, candidate.app_id, candidate.state_file, &empty, &current, true, options.steam_app_id, &metadata);
             }
             try tracked.append(allocator, .{
                 .product_id = candidate.app_id,
@@ -101,12 +108,21 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     }
 }
 
-fn emitNew(allocator: std.mem.Allocator, io: std.Io, journal: *Journal, notifier: *?WindowsNotifier, product_id: u32, before: *const snapshot.Snapshot, after: *const snapshot.Snapshot, recovered: bool, steam_app_id: ?u32, metadata: *const MetadataCatalog) !void {
+fn emitNew(allocator: std.mem.Allocator, io: std.Io, journal: *Journal, notifier: *?WindowsNotifier, guard: *?replay_guard.Guard, product_id: u32, state_path: []const u8, before: *const snapshot.Snapshot, after: *snapshot.Snapshot, recovered: bool, steam_app_id: ?u32, metadata: *const MetadataCatalog) !void {
     var iterator = after.achievements.iterator();
     while (iterator.next()) |entry| {
         if (!entry.value_ptr.earned) continue;
         const old = before.achievements.get(entry.key_ptr.*);
         if (old != null and old.?.earned) continue;
+        if (guard.*) |*active| if (active.suppresses(product_id, entry.key_ptr.*)) {
+            try active.suppressReplay(state_path);
+            entry.value_ptr.* = .{};
+            std.debug.print(
+                "[UplayR2ReplayGuard] product_id={d} achievement={s} state=startup_replay_suppressed next=await_gameplay\n",
+                .{ product_id, entry.key_ptr.* },
+            );
+            continue;
+        };
         const detected_at = unixNow(io);
         const event = AchievementEvent{
             .app_id = product_id,
@@ -116,7 +132,10 @@ fn emitNew(allocator: std.mem.Allocator, io: std.Io, journal: *Journal, notifier
             .detected_at = detected_at,
             .recovered = recovered,
         };
-        if (!try journal.recordEvent(event)) continue;
+        const awaited_gameplay = if (guard.*) |*active| active.awaitsGameplay(product_id, entry.key_ptr.*) else false;
+        const recorded = try journal.recordEvent(event);
+        if (awaited_gameplay) if (guard.*) |*active| try active.complete();
+        if (!recorded) continue;
         std.debug.print("[AchievementBridge]\nprovider=uplay_r2\nproduct_id={d}\nachievement={s}\nstate=unlocked\ntimestamp={d}\nrecovered={}\n\n", .{ product_id, event.source_id, event.unlocked_at, event.recovered });
         const mapping = if (steam_app_id) |canonical_app_id| mapper.mapNumericSuffix(event.source_id, canonical_app_id, metadata) else null;
         const details = if (mapping) |mapped| metadata.get(mapped.canonical_achievement_id) else null;

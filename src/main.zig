@@ -1,7 +1,7 @@
 const std = @import("std");
 const bridge = @import("achievement_bridge");
 
-const Command = enum { scan, watch, watch_all, probe, games, sessions, host, catalog, local_record, steam_read, steam_unlock, steam_local_clear, steam_local_sync, steam_watch, ubisoft_scan, ubisoft_watch, uplay_r2_diagnose, uplay_r2_prepare, uplay_r2_scan, uplay_r2_watch, notify_test, help };
+const Command = enum { scan, watch, watch_all, probe, games, sessions, host, catalog, local_record, steam_read, steam_unlock, steam_local_clear, steam_local_sync, steam_watch, ubisoft_scan, ubisoft_watch, uplay_r2_diagnose, uplay_r2_prepare, uplay_r2_arm_replay, uplay_r2_scan, uplay_r2_watch, notify_test, help };
 
 const Cli = struct {
     command: Command = .watch,
@@ -197,6 +197,7 @@ pub fn main(init: std.process.Init) !void {
         const appdata = init.environ_map.get("APPDATA") orelse return error.MissingAppData;
         const localappdata = init.environ_map.get("LOCALAPPDATA") orelse return error.MissingLocalAppData;
         const journal_path = cli.journal_path orelse try defaultJournalPath(allocator, init.environ_map);
+        const replay_guard_path = try defaultR2ReplayGuardPath(allocator, init.environ_map);
         const gse_roots = &[_][]const u8{
             try std.fs.path.join(allocator, &.{ appdata, "GSE Saves" }),
             try std.fs.path.join(allocator, &.{ appdata, "Goldberg SteamEmu Saves" }),
@@ -215,6 +216,7 @@ pub fn main(init: std.process.Init) !void {
             .r2_roots = r2_roots,
             .spool_root = spool_root,
             .journal_path = journal_path,
+            .replay_guard_path = replay_guard_path,
             .interval_ms = cli.interval_ms,
             .recover = cli.recover,
             .notifications = cli.notifications,
@@ -373,6 +375,19 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (cli.command == .uplay_r2_arm_replay) {
+        if (!cli.confirm_local_write) return error.LocalWriteConfirmationRequired;
+        const product_id = cli.app_id orelse return error.MissingAppId;
+        const achievement = cli.achievement_id orelse return error.MissingAchievement;
+        const replay_guard_path = try defaultR2ReplayGuardPath(allocator, init.environ_map);
+        try bridge.providers.uplay_r2.replay_guard.arm(allocator, init.io, replay_guard_path, product_id, achievement);
+        std.debug.print(
+            "[UplayR2ReplayGuard] product_id={d} achievement={s} state=armed path={s}\n",
+            .{ product_id, achievement, replay_guard_path },
+        );
+        return;
+    }
+
     if (cli.command == .notify_test) {
         const app_id = cli.app_id orelse return error.MissingAppId;
         const wanted = cli.achievement_id orelse return error.MissingAchievement;
@@ -412,6 +427,7 @@ pub fn main(init: std.process.Init) !void {
             try bridge.providers.uplay_r2.watcher.scan(allocator, init.io, cli.roots.items);
         } else {
             const journal_path = cli.journal_path orelse try defaultJournalPath(allocator, init.environ_map);
+            const replay_guard_path = try defaultR2ReplayGuardPath(allocator, init.environ_map);
             const mapping_root: ?[]const u8 = if (cli.app_id != null)
                 if (cli.steam_root) |root| root else bridge.detector.steam_install.findSteamRoot(allocator, init.io) catch null
             else
@@ -424,6 +440,7 @@ pub fn main(init: std.process.Init) !void {
                 .notifications = cli.notifications,
                 .steam_app_id = cli.app_id,
                 .steam_root = mapping_root,
+                .replay_guard_path = replay_guard_path,
             });
         }
         return;
@@ -471,6 +488,7 @@ pub fn main(init: std.process.Init) !void {
         .ubisoft_watch => unreachable,
         .uplay_r2_diagnose => unreachable,
         .uplay_r2_prepare => unreachable,
+        .uplay_r2_arm_replay => unreachable,
         .uplay_r2_scan => unreachable,
         .uplay_r2_watch => unreachable,
         .notify_test => unreachable,
@@ -484,6 +502,7 @@ const WatchAllContext = struct {
     r2_roots: []const []const u8,
     spool_root: []const u8,
     journal_path: []const u8,
+    replay_guard_path: []const u8,
     interval_ms: u32,
     recover: bool,
     notifications: bool,
@@ -536,6 +555,7 @@ fn watchR2Worker(context: *const WatchAllContext) void {
         bridge.providers.uplay_r2.watcher.run(std.heap.smp_allocator, context.io, .{
             .roots = context.r2_roots,
             .journal_path = context.journal_path,
+            .replay_guard_path = context.replay_guard_path,
             .interval_ms = context.interval_ms,
             .recover = context.recover,
             .notifications = context.notifications,
@@ -550,7 +570,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli {
     var cli = Cli{};
     var index: usize = 1;
     if (index < args.len and !std.mem.startsWith(u8, args[index], "--")) {
-        if (std.mem.eql(u8, args[index], "scan")) cli.command = .scan else if (std.mem.eql(u8, args[index], "watch")) cli.command = .watch else if (std.mem.eql(u8, args[index], "watch-all")) cli.command = .watch_all else if (std.mem.eql(u8, args[index], "probe")) cli.command = .probe else if (std.mem.eql(u8, args[index], "games")) cli.command = .games else if (std.mem.eql(u8, args[index], "sessions")) cli.command = .sessions else if (std.mem.eql(u8, args[index], "host")) cli.command = .host else if (std.mem.eql(u8, args[index], "catalog")) cli.command = .catalog else if (std.mem.eql(u8, args[index], "local-record")) cli.command = .local_record else if (std.mem.eql(u8, args[index], "steam-read")) cli.command = .steam_read else if (std.mem.eql(u8, args[index], "steam-unlock")) cli.command = .steam_unlock else if (std.mem.eql(u8, args[index], "steam-local-clear")) cli.command = .steam_local_clear else if (std.mem.eql(u8, args[index], "steam-local-sync")) cli.command = .steam_local_sync else if (std.mem.eql(u8, args[index], "steam-watch")) cli.command = .steam_watch else if (std.mem.eql(u8, args[index], "ubisoft-scan")) cli.command = .ubisoft_scan else if (std.mem.eql(u8, args[index], "ubisoft-watch")) cli.command = .ubisoft_watch else if (std.mem.eql(u8, args[index], "uplay-r2-diagnose")) cli.command = .uplay_r2_diagnose else if (std.mem.eql(u8, args[index], "uplay-r2-prepare")) cli.command = .uplay_r2_prepare else if (std.mem.eql(u8, args[index], "uplay-r2-scan")) cli.command = .uplay_r2_scan else if (std.mem.eql(u8, args[index], "uplay-r2-watch")) cli.command = .uplay_r2_watch else if (std.mem.eql(u8, args[index], "notify-test")) cli.command = .notify_test else if (std.mem.eql(u8, args[index], "help")) cli.command = .help else return error.UnknownCommand;
+        if (std.mem.eql(u8, args[index], "scan")) cli.command = .scan else if (std.mem.eql(u8, args[index], "watch")) cli.command = .watch else if (std.mem.eql(u8, args[index], "watch-all")) cli.command = .watch_all else if (std.mem.eql(u8, args[index], "probe")) cli.command = .probe else if (std.mem.eql(u8, args[index], "games")) cli.command = .games else if (std.mem.eql(u8, args[index], "sessions")) cli.command = .sessions else if (std.mem.eql(u8, args[index], "host")) cli.command = .host else if (std.mem.eql(u8, args[index], "catalog")) cli.command = .catalog else if (std.mem.eql(u8, args[index], "local-record")) cli.command = .local_record else if (std.mem.eql(u8, args[index], "steam-read")) cli.command = .steam_read else if (std.mem.eql(u8, args[index], "steam-unlock")) cli.command = .steam_unlock else if (std.mem.eql(u8, args[index], "steam-local-clear")) cli.command = .steam_local_clear else if (std.mem.eql(u8, args[index], "steam-local-sync")) cli.command = .steam_local_sync else if (std.mem.eql(u8, args[index], "steam-watch")) cli.command = .steam_watch else if (std.mem.eql(u8, args[index], "ubisoft-scan")) cli.command = .ubisoft_scan else if (std.mem.eql(u8, args[index], "ubisoft-watch")) cli.command = .ubisoft_watch else if (std.mem.eql(u8, args[index], "uplay-r2-diagnose")) cli.command = .uplay_r2_diagnose else if (std.mem.eql(u8, args[index], "uplay-r2-prepare")) cli.command = .uplay_r2_prepare else if (std.mem.eql(u8, args[index], "uplay-r2-arm-replay")) cli.command = .uplay_r2_arm_replay else if (std.mem.eql(u8, args[index], "uplay-r2-scan")) cli.command = .uplay_r2_scan else if (std.mem.eql(u8, args[index], "uplay-r2-watch")) cli.command = .uplay_r2_watch else if (std.mem.eql(u8, args[index], "notify-test")) cli.command = .notify_test else if (std.mem.eql(u8, args[index], "help")) cli.command = .help else return error.UnknownCommand;
         index += 1;
     }
     while (index < args.len) : (index += 1) {
@@ -658,6 +678,7 @@ fn printHelp() void {
         \\  achievement-bridge ubisoft-watch [--root SPOOL_PATH]
         \\  achievement-bridge uplay-r2-diagnose --game-dir PATH
         \\  achievement-bridge uplay-r2-prepare --game-dir PATH --catalog FILE
+        \\  achievement-bridge uplay-r2-arm-replay --appid R2_PRODUCT_ID --achievement ID --confirm-local-write
         \\  achievement-bridge uplay-r2-scan [--root SAVE_PATH]
         \\  achievement-bridge uplay-r2-watch [--root SAVE_PATH] [--appid STEAM_ID]
         \\  achievement-bridge notify-test --appid ID --achievement API_NAME [--wait-for-game --game-dir PATH]
@@ -705,6 +726,13 @@ fn defaultLocalStorePath(allocator: std.mem.Allocator, environ_map: *const std.p
         return std.fs.path.join(allocator, &.{ localappdata, "AchievementBridge", "local-achievements.json" });
     }
     return ".achievement-bridge/local-achievements.json";
+}
+
+fn defaultR2ReplayGuardPath(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {
+    if (environ_map.get("LOCALAPPDATA")) |localappdata| {
+        return std.fs.path.join(allocator, &.{ localappdata, "AchievementBridge", "r2-replay-guard.json" });
+    }
+    return ".achievement-bridge/r2-replay-guard.json";
 }
 
 fn defaultBackupRoot(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {

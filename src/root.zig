@@ -56,6 +56,7 @@ pub const providers = struct {
     };
     pub const uplay_r2 = struct {
         pub const diagnostic = @import("providers/uplay_r2/diagnostic.zig");
+        pub const replay_guard = @import("providers/uplay_r2/replay_guard.zig");
         pub const schema = @import("providers/uplay_r2/schema.zig");
         pub const watcher = @import("providers/uplay_r2/watcher.zig");
     };
@@ -97,6 +98,7 @@ test {
     _ = providers.ubisoft.discovery;
     _ = providers.ubisoft.watcher;
     _ = providers.uplay_r2.diagnostic;
+    _ = providers.uplay_r2.replay_guard;
     _ = providers.uplay_r2.schema;
     _ = providers.uplay_r2.watcher;
 }
