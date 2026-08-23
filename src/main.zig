@@ -283,6 +283,7 @@ pub fn main(init: std.process.Init) !void {
             .crc = result.crc,
             .host_status = @tagName(result.host_status),
             .steam_refreshed = result.steam_refreshed,
+            .steam_confirmed = result.steam_confirmed,
             .native_notification = @tagName(result.native_notification),
             .stats_path = result.stats_path,
             .backup_path = result.backup_path,
