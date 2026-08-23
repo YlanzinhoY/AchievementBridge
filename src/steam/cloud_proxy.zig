@@ -190,7 +190,7 @@ export fn CR_GetAchievements(app_id: u32, output: [*]AchievementBlock, max_block
 
 export fn CR_Shutdown() callconv(.c) void {
     initialized.store(false, .release);
-    persistOverlays();
+    _ = persistOverlays();
     stopPipeServer();
     if (real) |api| {
         api.shutdown();
@@ -287,8 +287,7 @@ fn handleRequest(request: Request) Status {
     if (current_account_id.load(.acquire) == 0) return .invalid_request;
     if (!isManagedApp(request.app_id)) return .app_not_managed;
     if (real) |api| if (api.notify_stats_stored) |notify| notify(request.app_id);
-    putOverlay(request.app_id, request.stat_id, @intCast(request.bit), request.unlock_time);
-    return .ok;
+    return if (putOverlay(request.app_id, request.stat_id, @intCast(request.bit), request.unlock_time)) .ok else .invalid_request;
 }
 
 fn addManagedApp(app_id: u32) void {
@@ -318,7 +317,7 @@ fn isManagedApp(app_id: u32) bool {
     return false;
 }
 
-fn putOverlay(app_id: u32, stat_id: u32, bit: u5, unlock_time: u32) void {
+fn putOverlay(app_id: u32, stat_id: u32, bit: u5, unlock_time: u32) bool {
     {
         lockState();
         defer state_mutex.unlock();
@@ -331,7 +330,7 @@ fn putOverlay(app_id: u32, stat_id: u32, bit: u5, unlock_time: u32) void {
             }
         }
         if (target == null) {
-            if (overlay_count == overlays.len) return;
+            if (overlay_count == overlays.len) return false;
             overlays[overlay_count] = .{ .account_id = account_id, .app_id = app_id, .block = std.mem.zeroes(AchievementBlock) };
             overlays[overlay_count].block.stat_id = stat_id;
             target = &overlays[overlay_count].block;
@@ -342,7 +341,7 @@ fn putOverlay(app_id: u32, stat_id: u32, bit: u5, unlock_time: u32) void {
             block.unlock_times[bit] = unlock_time;
         }
     }
-    persistOverlays();
+    return persistOverlays();
 }
 
 fn configureOverlayPath(steam_path_z: [*:0]const u8) void {
@@ -384,13 +383,13 @@ fn loadOverlays() void {
     };
 }
 
-fn persistOverlays() void {
-    const path = overlayPath() orelse return;
+fn persistOverlays() bool {
+    const path = overlayPath() orelse return false;
     const allocator = std.heap.page_allocator;
     lockState();
     const entries = allocator.alloc(PersistentOverlayEntry, overlay_count) catch {
         state_mutex.unlock();
-        return;
+        return false;
     };
     for (overlays[0..overlay_count], 0..) |entry, index| entries[index] = .{
         .account_id = entry.account_id,
@@ -403,20 +402,24 @@ fn persistOverlays() void {
     const bytes = std.mem.sliceAsBytes(entries);
     const header = OverlayFileHeader{ .count = @intCast(entries.len), .crc = std.hash.Crc32.hash(bytes) };
     var temporary: [32768]u16 = @splat(0);
-    if (overlay_path_len + 4 >= temporary.len) return;
+    if (overlay_path_len + 4 >= temporary.len) return false;
     @memcpy(temporary[0..overlay_path_len], overlay_path_w[0..overlay_path_len]);
     @memcpy(temporary[overlay_path_len..][0..4], std.unicode.utf8ToUtf16LeStringLiteral(".tmp"));
     const temporary_path = temporary[0 .. overlay_path_len + 4 :0].ptr;
     const file = kernel32.CreateFileW(temporary_path, 0x40000000, 0, null, 2, 0x80, null);
-    if (file == windows.INVALID_HANDLE_VALUE) return;
+    if (file == windows.INVALID_HANDLE_VALUE) return false;
     var complete = writeAll(file, std.mem.asBytes(&header)) and writeAll(file, bytes);
     if (complete) complete = kernel32.FlushFileBuffers(file).toBool();
     _ = kernel32.CloseHandle(file);
     if (!complete) {
         _ = kernel32.DeleteFileW(temporary_path);
-        return;
+        return false;
     }
-    if (!kernel32.MoveFileExW(temporary_path, path, 0x00000009).toBool()) _ = kernel32.DeleteFileW(temporary_path);
+    if (!kernel32.MoveFileExW(temporary_path, path, 0x00000009).toBool()) {
+        _ = kernel32.DeleteFileW(temporary_path);
+        return false;
+    }
+    return true;
 }
 
 fn overlayPath() ?[*:0]const u16 {

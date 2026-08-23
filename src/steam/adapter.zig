@@ -41,14 +41,14 @@ pub fn isAchievementUnlocked(session: *const Session, allocator: std.mem.Allocat
     return session.client.user_stats.isAchievementUnlocked(api_name_z);
 }
 
-/// Displays the native progress toast only after the caller has independently
-/// confirmed that the local Steam state contains the achievement.
+/// Displays the native progress toast after the caller has independently
+/// confirmed a durable local cache and overlay. The ABI may still report the
+/// achievement as locked for publisher-protected schemas.
 pub fn queueAchievementProgressNotification(session: *Session, allocator: std.mem.Allocator, io: std.Io, api_name: []const u8) !void {
     if (api_name.len == 0 or api_name.len > 127 or std.mem.indexOfScalar(u8, api_name, 0) != null) return error.InvalidAchievementApiName;
     const api_name_z = try allocator.dupeZ(u8, api_name);
     defer allocator.free(api_name_z);
     try session.client.loadCurrentUserStats(io, session.app_id, 5000);
-    if (!try session.client.user_stats.isAchievementUnlocked(api_name_z)) return error.AchievementNotConfirmed;
     if (!session.client.user_stats.indicateAchievementProgress(api_name_z, 1, 2))
         return error.AchievementProgressNotificationFailed;
 }

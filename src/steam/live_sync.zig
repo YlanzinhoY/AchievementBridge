@@ -160,7 +160,7 @@ pub fn sync(allocator: std.mem.Allocator, io: std.Io, options: Options) !Result 
         .not_requested
     else if (!mutation.changed)
         .not_new
-    else if (!steam_confirmed)
+    else if (!cache_confirmed or host_status != .captured)
         .sync_unconfirmed
     else
         tryNativeNotification(allocator, io, options.app_id, options.api_name, options.steam_root);
@@ -240,8 +240,6 @@ fn tryNativeNotification(
         error.UserStatsRequestFailed,
         error.UserStatsRequestRejected,
         error.UserStatsCallbackTimeout,
-        error.GetAchievementFailed,
-        error.AchievementNotConfirmed,
         => .stats_unavailable,
         error.AchievementProgressNotificationFailed => .progress_failed,
         else => .steam_unavailable,
