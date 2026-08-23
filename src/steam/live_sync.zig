@@ -47,6 +47,7 @@ pub const Result = struct {
     unlock_time: u32,
     crc: u32,
     host_status: HostStatus,
+    cache_confirmed: bool,
     steam_refreshed: bool,
     steam_confirmed: bool,
     native_notification: NativeNotificationStatus,
@@ -135,6 +136,13 @@ pub fn sync(allocator: std.mem.Allocator, io: std.Io, options: Options) !Result 
         break :blk .captured;
     };
 
+    const persisted = std.Io.Dir.cwd().readFileAlloc(io, stats_path, allocator, .limited(64 * 1024 * 1024)) catch null;
+    defer if (persisted) |bytes| allocator.free(bytes);
+    const cache_confirmed = if (persisted) |bytes|
+        local_cache.verifyUnlock(allocator, bytes, location.stat_id, location.bit, mutation.unlock_time) catch false
+    else
+        false;
+
     var steam_refreshed = false;
     var steam_confirmed = false;
     if (host_status == .captured) {
@@ -167,6 +175,7 @@ pub fn sync(allocator: std.mem.Allocator, io: std.Io, options: Options) !Result 
         .unlock_time = mutation.unlock_time,
         .crc = mutation.crc,
         .host_status = host_status,
+        .cache_confirmed = cache_confirmed,
         .steam_refreshed = steam_refreshed,
         .steam_confirmed = steam_confirmed,
         .native_notification = native_notification,

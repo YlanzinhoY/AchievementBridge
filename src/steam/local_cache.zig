@@ -13,6 +13,45 @@ pub const Mutation = struct {
     }
 };
 
+/// Verifies a persisted unlock by parsing the native cache again, validating
+/// its CRC, achievement bit, and exact timestamp. This is independent of the
+/// Steamworks ABI, whose in-memory view may remain stale until Steam restarts.
+pub fn verifyUnlock(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    stat_id: u32,
+    bit: u5,
+    expected_unlock_time: u32,
+) !bool {
+    if (expected_unlock_time == 0) return false;
+
+    var document = try bkv.parse(allocator, bytes);
+    defer document.deinit();
+    const cache = document.child("cache") orelse return false;
+    const crc_node = cache.child("crc") orelse return false;
+    if (crc_node.tag != .int32 or crc_node.value_len != 4) return false;
+    const stored_crc: u32 = @intCast(try bkv.unsignedValue(bytes, crc_node));
+    if (stored_crc != try computeCrc(allocator, bytes)) return false;
+
+    var stat_name_buffer: [16]u8 = undefined;
+    const stat_name = try std.fmt.bufPrint(&stat_name_buffer, "{d}", .{stat_id});
+    const stat = cache.child(stat_name) orelse return false;
+    if (stat.tag != .section) return false;
+    const data = stat.child("data") orelse return false;
+    if (data.tag != .int32 or data.value_len != 4) return false;
+    const value: u32 = @intCast(try bkv.unsignedValue(bytes, data));
+    if ((value & (@as(u32, 1) << bit)) == 0) return false;
+
+    const times = stat.child("AchievementTimes") orelse return false;
+    if (times.tag != .section) return false;
+    var bit_name_buffer: [4]u8 = undefined;
+    const bit_name = try std.fmt.bufPrint(&bit_name_buffer, "{d}", .{bit});
+    const time_node = times.child(bit_name) orelse return false;
+    if (time_node.tag != .int32 or time_node.value_len != 4) return false;
+    const unlock_time: u32 = @intCast(try bkv.unsignedValue(bytes, time_node));
+    return unlock_time == expected_unlock_time;
+}
+
 /// Adds one achievement bit to a native UserGameStats cache. Existing nodes are
 /// edited in place and new nodes are spliced immediately before their parent
 /// terminator, so unrelated stats and unknown KeyValues fields survive intact.
@@ -314,6 +353,14 @@ test "unlock reproduces the proven Black Flag native cache" {
     try std.testing.expect(mutation.changed);
     try std.testing.expectEqual(@as(u32, 0xED63B685), mutation.crc);
     try std.testing.expectEqualSlices(u8, expected, mutation.bytes);
+    try std.testing.expect(try verifyUnlock(std.testing.allocator, mutation.bytes, 1, 9, 1787390253));
+    try std.testing.expect(!try verifyUnlock(std.testing.allocator, mutation.bytes, 1, 8, 1787390253));
+    try std.testing.expect(!try verifyUnlock(std.testing.allocator, mutation.bytes, 1, 9, 1787390254));
+
+    var corrupted = try std.testing.allocator.dupe(u8, mutation.bytes);
+    defer std.testing.allocator.free(corrupted);
+    corrupted[12] ^= 1;
+    try std.testing.expect(!try verifyUnlock(std.testing.allocator, corrupted, 1, 9, 1787390253));
 }
 
 test "unlock is idempotent and preserves unknown fields" {

@@ -282,6 +282,7 @@ pub fn main(init: std.process.Init) !void {
             .timestamp = result.unlock_time,
             .crc = result.crc,
             .host_status = @tagName(result.host_status),
+            .cache_confirmed = result.cache_confirmed,
             .steam_refreshed = result.steam_refreshed,
             .steam_confirmed = result.steam_confirmed,
             .native_notification = @tagName(result.native_notification),

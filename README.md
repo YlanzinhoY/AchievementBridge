@@ -123,13 +123,13 @@ O sync aceita uma tentativa opcional, desligada por padrão:
 achievement-bridge steam-local-sync --appid 3751950 --achievement ACObsidian_Ach_10 --timestamp 1787390253 --experimental-steam-notification
 ```
 
-Depois de gravar o cache e pedir a recaptura ao host, o Bridge recarrega os stats pela ABI e lê a conquista de volta. `steam_confirmed=true` significa que a Steam devolveu o estado local como desbloqueado; `sync_unconfirmed` significa que a escrita não foi confirmada e, portanto, não deve produzir popup nem toast.
+Depois de gravar o cache e pedir a recaptura ao host, o Bridge relê o arquivo nativo e valida CRC, bit e timestamp. `cache_confirmed=true` comprova que o desbloqueio está persistido no cache local da Steam. Em paralelo, o Bridge recarrega os stats pela ABI: `steam_confirmed=true` significa que a visão em memória da Steam também já devolveu o estado como desbloqueado. Essa segunda confirmação pode continuar falsa até uma atualização ou reinício do cliente mesmo quando o cache local já está correto.
 
-A rota experimental só chama `IndicateAchievementProgress(API_NAME, 1, 2)` depois dessa confirmação. Esse método continua sendo apenas o veículo visual do Overlay; a confirmação vem da releitura anterior, não do toast. O LuaTools também agrupa eventos por dois segundos e trata lotes de três ou mais como backfill de um save existente, sem sincronizá-los ou notificá-los automaticamente.
+A rota experimental só chama `IndicateAchievementProgress(API_NAME, 1, 2)` depois da confirmação pela ABI. Esse método continua sendo apenas o veículo visual do Overlay; a confirmação vem da releitura anterior, não do toast. Quando a ABI ainda está obsoleta, o LuaTools pode mostrar seu popup próprio somente após `cache_confirmed=true`, garantindo que a notificação corresponda a um evento novo persistido no cache Steam. O LuaTools também agrupa eventos por dois segundos e trata lotes de três ou mais como backfill de um save existente, sem sincronizá-los ou notificá-los automaticamente.
 
 Validado manualmente no Windows com Assassin's Creed IV Black Flag (`appid=3751950`, `ACObsidian_Ach_10`, `permission=2`): a Steam recusou `SetAchievement`, aceitou `IndicateAchievementProgress`, exibiu o toast nativo `1/2` com nome e imagem localizados e o Bridge concluiu o sync local. O resultado foi reproduzido duas vezes com confirmação visual.
 
-Os demais resultados (`not_new`, `already_unlocked`, `stats_unavailable`, `set_failed`, `progress_failed`, `store_failed` ou `steam_unavailable`) são explícitos no JSON para o host usar um fallback. O LuaTools só ativa essa rota para eventos novos em tempo real e mostra seu popup próprio quando a Steam não aceita nenhuma das tentativas nativas.
+Os demais resultados (`not_new`, `sync_unconfirmed`, `already_unlocked`, `stats_unavailable`, `set_failed`, `progress_failed`, `store_failed` ou `steam_unavailable`) são explícitos no JSON para o host usar um fallback. O LuaTools só ativa essa rota para eventos novos em tempo real e mostra seu popup próprio quando a persistência local foi relida com sucesso e a Steam não aceitou nenhuma das tentativas nativas.
 
 ## Ubisoft Connect oficial
 
