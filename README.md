@@ -123,9 +123,9 @@ O sync aceita uma tentativa opcional, desligada por padrão:
 achievement-bridge steam-local-sync --appid 3751950 --achievement ACObsidian_Ach_10 --timestamp 1787390253 --experimental-steam-notification
 ```
 
-Somente quando o cache ainda não contém a conquista, o Bridge carrega os stats pela ABI, chama `SetAchievement` e pede `StoreStats`. Ele não espera nem afirma persistência no servidor: `native_notification=store_queued` significa apenas que a Steam aceitou o pedido na fila local, que é o ponto normalmente associado ao toast do overlay. Essa chamada pode contatar os serviços da Steam.
+Depois de gravar o cache e pedir a recaptura ao host, o Bridge recarrega os stats pela ABI e lê a conquista de volta. `steam_confirmed=true` significa que a Steam devolveu o estado local como desbloqueado; `sync_unconfirmed` significa que a escrita não foi confirmada e, portanto, não deve produzir popup nem toast.
 
-Quando `SetAchievement` é recusado, a mesma tentativa pede `IndicateAchievementProgress(API_NAME, 1, 2)`. Esse método oficial não desbloqueia nem persiste nada: ele apenas solicita ao Steam Overlay um toast de progresso usando o nome e a imagem reais da conquista. `native_notification=progress_queued` indica que a Steam aceitou esse fallback.
+A rota experimental só chama `IndicateAchievementProgress(API_NAME, 1, 2)` depois dessa confirmação. Esse método continua sendo apenas o veículo visual do Overlay; a confirmação vem da releitura anterior, não do toast. O LuaTools também agrupa eventos por dois segundos e trata lotes de três ou mais como backfill de um save existente, sem sincronizá-los ou notificá-los automaticamente.
 
 Validado manualmente no Windows com Assassin's Creed IV Black Flag (`appid=3751950`, `ACObsidian_Ach_10`, `permission=2`): a Steam recusou `SetAchievement`, aceitou `IndicateAchievementProgress`, exibiu o toast nativo `1/2` com nome e imagem localizados e o Bridge concluiu o sync local. O resultado foi reproduzido duas vezes com confirmação visual.
 
