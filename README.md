@@ -2,7 +2,7 @@
 
 Bridge de conquistas Windows-only em Zig 0.16.0. Ele detecta jogos e runtimes, acompanha conquistas locais de GSE/Goldberg, RUNE, Steam, Ubisoft Connect e Uplay R2-compatible, normaliza os eventos, mantém um journal resiliente e mostra notificações nativas do Windows.
 
-O acesso direto ao `ISteamUserStats` é somente leitura por padrão. A única exceção estável é o comando manual `steam-unlock`, que exige `--confirm-steam-write` e tenta persistir no servidor com `StoreStats`. Separadamente, a integração LuaTools sincroniza automaticamente cada evento real do provider com o cache local da Steam; esse caminho não concede nada no servidor e não pede confirmação por conquista. Uma tentativa opt-in de toast do Steam Overlay está disponível como experimento e é descrita abaixo.
+O acesso direto ao `ISteamUserStats` é somente leitura por padrão. As exceções de escrita são o comando manual `steam-unlock`, que exige `--confirm-steam-write`, e o sync RUNE verificado, que só prossegue após reler o save e comprovar `Achieved=1` para o mesmo AppID/API name. Separadamente, a integração LuaTools sincroniza cada evento real do provider com o cache local da Steam como fallback. Uma tentativa opt-in de toast do Steam Overlay está disponível como experimento e é descrita abaixo.
 
 ## Compilar
 
@@ -49,6 +49,18 @@ No primeiro contato, conquistas existentes formam o baseline e não geram uma te
 Depois disso, cada nova seção com `Achieved=1` em `achievements.ini` vira um evento `provider=rune`.
 Como os IDs do RUNE preservam o API name da Steam, o LuaTools resolve o metadata oficial e passa o
 evento pelo mesmo sync local, popup e projeção ao vivo usados pelos outros providers.
+
+Para eventos RUNE, o LuaTools primeiro chama a rota comprovada:
+
+```powershell
+achievement-bridge rune-steam-sync --appid 3046600 --achievement ACHIEVEMENT_02
+```
+
+Essa rota não aceita uma confirmação cega da UI: redescobre
+`%PUBLIC%\Documents\Steam\RUNE\<appid>\achievements.ini` e recusa AppID ausente, API name ausente ou
+conquista sem `Achieved=1`. Só então chama `SetAchievement` e aguarda o callback bem-sucedido de
+`StoreStats`. Se a publicadora proteger o schema ou a Steam estiver indisponível, o LuaTools continua
+com o sync local e seu popup/UI como fallback.
 
 Observar um save customizado/portátil:
 
