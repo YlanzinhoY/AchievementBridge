@@ -909,6 +909,16 @@ test "parse experimental Steam notification opt-in" {
     try std.testing.expect(cli.experimental_steam_notification);
 }
 
+test "parse RUNE watcher command" {
+    const allocator = std.testing.allocator;
+    var cli = try parseArgs(allocator, &.{ "achievement-bridge", "rune-watch", "--root", "C:/RUNE", "--interval-ms", "250" });
+    defer cli.roots.deinit(allocator);
+    defer cli.schema_paths.deinit(allocator);
+    try std.testing.expectEqual(Command.rune_watch, cli.command);
+    try std.testing.expectEqualStrings("C:/RUNE", cli.roots.items[0]);
+    try std.testing.expectEqual(@as(u32, 250), cli.interval_ms);
+}
+
 test "parse confirmed local achievement clear" {
     const allocator = std.testing.allocator;
     var cli = try parseArgs(allocator, &.{
