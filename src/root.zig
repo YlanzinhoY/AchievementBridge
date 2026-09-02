@@ -46,6 +46,10 @@ pub const gse = struct {
 };
 
 pub const providers = struct {
+    pub const rune = struct {
+        pub const snapshot = @import("providers/rune/snapshot.zig");
+        pub const discovery = @import("providers/rune/discovery.zig");
+    };
     pub const steam = struct {
         pub const watcher = @import("providers/steam/watcher.zig");
     };
@@ -101,4 +105,6 @@ test {
     _ = providers.uplay_r2.replay_guard;
     _ = providers.uplay_r2.schema;
     _ = providers.uplay_r2.watcher;
+    _ = providers.rune.snapshot;
+    _ = providers.rune.discovery;
 }

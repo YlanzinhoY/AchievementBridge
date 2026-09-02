@@ -1,5 +1,6 @@
 pub const ProviderKind = enum {
     gse,
+    rune,
     steam,
     ubisoft,
     uplay_r2,
