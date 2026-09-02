@@ -3,6 +3,7 @@ const std = @import("std");
 pub const RuntimeKind = enum {
     steamworks,
     gse_compatible,
+    rune_compatible,
     ubisoft_connect,
     uplay_r2,
     epic_eos,
@@ -76,6 +77,10 @@ pub fn detect(allocator: std.mem.Allocator, io: std.Io, game_dir: []const u8) !R
             try report.addEvidence(.gse_compatible, 32);
         } else if (eql(name, "force_account_name.txt") or eql(name, "local_save.txt")) {
             try report.addEvidence(.gse_compatible, 45);
+        } else if (eql(name, "steam_emu.ini")) {
+            try report.addEvidence(.rune_compatible, 70);
+        } else if (eql(name, "steamclient64.dll")) {
+            try report.addEvidence(.rune_compatible, 20);
         } else if (eql(name, "eossdk-win64-shipping.dll") or eql(name, "eossdk-win32-shipping.dll")) {
             try report.addEvidence(.epic_eos, 85);
         } else if (eql(name, "uplay_r2_loader64.dll") or eql(name, "uplay_r2_loader.dll")) {
@@ -94,6 +99,12 @@ pub fn detect(allocator: std.mem.Allocator, io: std.Io, game_dir: []const u8) !R
     if (has_gse) {
         try report.addEvidence(.gse_compatible, 35);
         if (find(&report, .steamworks)) |steam| steam.confidence = @min(steam.confidence, 45);
+    }
+    if (find(&report, .rune_compatible)) |rune| {
+        if (rune.confidence >= 70) {
+            try report.addEvidence(.rune_compatible, 20);
+            if (find(&report, .steamworks)) |steam| steam.confidence = @min(steam.confidence, 45);
+        }
     }
     report.sort();
     return report;

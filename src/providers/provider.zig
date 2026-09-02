@@ -38,6 +38,18 @@ pub const steam = Descriptor{
     },
 };
 
+pub const rune = Descriptor{
+    .kind = .rune,
+    .name = "RUNE",
+    .version = "0.1.0",
+    .capabilities = .{
+        .realtime_events = true,
+        .snapshots = true,
+        .progress = true,
+        .timestamps = true,
+    },
+};
+
 pub const ubisoft = Descriptor{
     .kind = .ubisoft,
     .name = "Ubisoft Connect",
