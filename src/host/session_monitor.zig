@@ -85,7 +85,10 @@ pub const Monitor = struct {
                 .confidence = candidate.confidence,
             });
             try hosted.session.transition(.loading_providers);
-            for (hosted.session.providers.items) |*provider| provider.active = provider.kind == .gse or provider.kind == .steam;
+            for (hosted.session.providers.items) |*provider| provider.active = switch (provider.kind) {
+                .gse, .rune, .steam, .ubisoft, .uplay_r2 => true,
+                .epic, .gog, .ea, .xbox => false,
+            };
             try hosted.session.transition(.watching);
             try self.active.put(process.pid, hosted);
             try seen.put(process.pid, {});

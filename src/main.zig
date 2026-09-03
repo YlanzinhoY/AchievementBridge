@@ -558,15 +558,37 @@ const WatchAllContext = struct {
 };
 
 fn runAllWatchers(context: *const WatchAllContext) !void {
-    std.debug.print("[AchievementBridge] mode=watch-all providers=gse,rune,ubisoft,uplay_r2\n", .{});
+    std.debug.print("[AchievementBridge] mode=watch-all providers=gse,rune,ubisoft,uplay_r2 sessions=enabled\n", .{});
+    const session_thread = try std.Thread.spawn(.{}, watchSessionWorker, .{context});
     const gse_thread = try std.Thread.spawn(.{}, watchGseWorker, .{context});
     const rune_thread = try std.Thread.spawn(.{}, watchRuneWorker, .{context});
     const ubisoft_thread = try std.Thread.spawn(.{}, watchUbisoftWorker, .{context});
     const r2_thread = try std.Thread.spawn(.{}, watchR2Worker, .{context});
+    session_thread.join();
     gse_thread.join();
     rune_thread.join();
     ubisoft_thread.join();
     r2_thread.join();
+}
+
+fn watchSessionWorker(context: *const WatchAllContext) void {
+    while (true) {
+        runSessionMonitor(context) catch |err| {
+            std.debug.print("[AchievementBridge] provider=sessions restart_reason={s}\n", .{@errorName(err)});
+            std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
+        };
+    }
+}
+
+fn runSessionMonitor(context: *const WatchAllContext) !void {
+    const allocator = std.heap.smp_allocator;
+    const steam_root = try bridge.detector.steam_install.findSteamRoot(allocator, context.io);
+    defer allocator.free(steam_root);
+    var catalog = try bridge.detector.steam_install.discover(allocator, context.io, steam_root);
+    defer catalog.deinit();
+    var monitor = bridge.host.session_monitor.Monitor.init(allocator, context.io, &catalog);
+    defer monitor.deinit();
+    try monitor.run(.{ .interval_ms = @max(context.interval_ms, 1000) });
 }
 
 fn watchRuneWorker(context: *const WatchAllContext) void {

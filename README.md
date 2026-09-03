@@ -33,7 +33,7 @@ O LuaTools usa `watch-all`, que mantém GSE, RUNE, Ubisoft oficial e Uplay R2 em
 zig build run -- watch-all --no-notifications
 ```
 
-Os eventos continuam num único stream ordenado; o popup rico e a sincronização local ficam sob responsabilidade do LuaTools. O processo persistente não inicializa o cliente Steam nem assume um App ID. Ao receber uma conquista, o LuaTools consulta o catálogo e sincroniza a Steam por comandos Bridge de curta duração, evitando que um jogo permaneça incorretamente marcado como aberto.
+Os eventos continuam num único stream ordenado; o popup rico e a sincronização local ficam sob responsabilidade do LuaTools. Um worker de sessões também informa quando um executável de jogo abre ou fecha e quais providers foram detectados. O processo persistente não inicializa o cliente Steam nem assume um App ID. Ao receber uma conquista, o LuaTools consulta o catálogo e sincroniza a Steam por comandos Bridge de curta duração, evitando que um jogo permaneça incorretamente marcado como aberto.
 
 ## RUNE
 
