@@ -233,10 +233,6 @@ pub fn main(init: std.process.Init) !void {
         };
         const rune_roots = &[_][]const u8{try defaultRuneRoot(allocator, init.environ_map)};
         const spool_root = try std.fs.path.join(allocator, &.{ localappdata, "Ubisoft Game Launcher", "spool" });
-        const steam_root: ?[]const u8 = if (cli.steam_root) |root|
-            root
-        else
-            bridge.detector.steam_install.findSteamRoot(allocator, init.io) catch null;
         const context = WatchAllContext{
             .io = init.io,
             .gse_roots = gse_roots,
@@ -248,7 +244,6 @@ pub fn main(init: std.process.Init) !void {
             .interval_ms = cli.interval_ms,
             .recover = cli.recover,
             .notifications = cli.notifications,
-            .steam_root = steam_root,
         };
         try runAllWatchers(&context);
         return;
@@ -560,7 +555,6 @@ const WatchAllContext = struct {
     interval_ms: u32,
     recover: bool,
     notifications: bool,
-    steam_root: ?[]const u8,
 };
 
 fn runAllWatchers(context: *const WatchAllContext) !void {
@@ -583,7 +577,12 @@ fn watchRuneWorker(context: *const WatchAllContext) void {
             .interval_ms = context.interval_ms,
             .recover = context.recover,
             .notifications = context.notifications,
-            .steam_root = context.steam_root,
+            // watch-all lives for the whole LuaTools session. Initializing the
+            // Steam client here makes Steam associate this process with the
+            // queried App ID until the process exits. Metadata and local Steam
+            // sync are deliberately handled by LuaTools through short-lived
+            // Bridge commands after an actual provider event is emitted.
+            .steam_root = null,
         }) catch |err| {
             std.debug.print("[AchievementBridge] provider=rune restart_reason={s}\n", .{@errorName(err)});
             std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
@@ -599,7 +598,10 @@ fn watchGseWorker(context: *const WatchAllContext) void {
             .interval_ms = context.interval_ms,
             .recover = context.recover,
             .notifications = context.notifications,
-            .steam_root = context.steam_root,
+            // Keep the persistent watcher detached from every Steam App ID.
+            // LuaTools enriches and synchronizes emitted events in isolated,
+            // short-lived Bridge processes.
+            .steam_root = null,
         }) catch |err| {
             std.debug.print("[AchievementBridge] provider=gse restart_reason={s}\n", .{@errorName(err)});
             std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
