@@ -1,8 +1,8 @@
 # Achievement Bridge
 
-Bridge de conquistas Windows-only em Zig 0.16.0. Ele detecta jogos e runtimes, acompanha conquistas locais de GSE/Goldberg, Steam, Ubisoft Connect e Uplay R2-compatible, normaliza os eventos, mantém um journal resiliente e mostra notificações nativas do Windows.
+Bridge de conquistas Windows-only em Zig 0.16.0. Ele detecta jogos e runtimes, acompanha conquistas locais de GSE/Goldberg, RUNE, Steam, Ubisoft Connect e Uplay R2-compatible, normaliza os eventos, mantém um journal resiliente e mostra notificações nativas do Windows.
 
-O acesso direto ao `ISteamUserStats` é somente leitura por padrão. A única exceção estável é o comando manual `steam-unlock`, que exige `--confirm-steam-write` e tenta persistir no servidor com `StoreStats`. Separadamente, a integração LuaTools sincroniza automaticamente cada evento real do provider com o cache local da Steam; esse caminho não concede nada no servidor e não pede confirmação por conquista. Uma tentativa opt-in de toast do Steam Overlay está disponível como experimento e é descrita abaixo.
+O acesso direto ao `ISteamUserStats` é somente leitura por padrão. As exceções de escrita são o comando manual `steam-unlock`, que exige `--confirm-steam-write`, e o sync RUNE verificado, que só prossegue após reler o save e comprovar `Achieved=1` para o mesmo AppID/API name. Separadamente, a integração LuaTools sincroniza cada evento real do provider com o cache local da Steam como fallback. Uma tentativa opt-in de toast do Steam Overlay está disponível como experimento e é descrita abaixo.
 
 ## Compilar
 
@@ -27,13 +27,40 @@ Observar os roots GSE padrão com popup, som, recovery e metadata Steam automát
 zig build run -- watch
 ```
 
-O LuaTools usa `watch-all`, que mantém GSE, Ubisoft oficial e Uplay R2 em workers isolados dentro de um único processo Bridge:
+O LuaTools usa `watch-all`, que mantém GSE, RUNE, Ubisoft oficial e Uplay R2 em workers isolados dentro de um único processo Bridge:
 
 ```powershell
 zig build run -- watch-all --no-notifications
 ```
 
 Os eventos continuam num único stream ordenado; o popup rico e a sincronização local ficam sob responsabilidade do LuaTools.
+
+## RUNE
+
+O provider RUNE descobre automaticamente `%PUBLIC%\Documents\Steam\RUNE\<appid>\achievements.ini`,
+lê os API names e timestamps nativos e observa alterações sem modificar o save. Para diagnóstico:
+
+```powershell
+zig build run -- rune-scan
+zig build run -- rune-watch
+```
+
+No primeiro contato, conquistas existentes formam o baseline e não geram uma tempestade de popups.
+Depois disso, cada nova seção com `Achieved=1` em `achievements.ini` vira um evento `provider=rune`.
+Como os IDs do RUNE preservam o API name da Steam, o LuaTools resolve o metadata oficial e passa o
+evento pelo mesmo sync local, popup e projeção ao vivo usados pelos outros providers.
+
+Para eventos RUNE, o LuaTools primeiro chama a rota comprovada:
+
+```powershell
+achievement-bridge rune-steam-sync --appid 3046600 --achievement ACHIEVEMENT_02
+```
+
+Essa rota não aceita uma confirmação cega da UI: redescobre
+`%PUBLIC%\Documents\Steam\RUNE\<appid>\achievements.ini` e recusa AppID ausente, API name ausente ou
+conquista sem `Achieved=1`. Só então chama `SetAchievement` e aguarda o callback bem-sucedido de
+`StoreStats`. Se a publicadora proteger o schema ou a Steam estiver indisponível, o LuaTools continua
+com o sync local e seu popup/UI como fallback.
 
 Observar um save customizado/portátil:
 
@@ -96,7 +123,7 @@ O comando carrega os stats atuais, valida o API name, chama `SetAchievement` e s
 
 ## Sincronização local automática
 
-Quando o LuaTools recebe um novo evento de GSE ou Uplay/Ubisoft mapeável para um AppID, ele resolve primeiro o API name pelo catálogo Steam e chama internamente:
+Quando o LuaTools recebe um novo evento de GSE, RUNE ou Uplay/Ubisoft mapeável para um AppID, ele resolve primeiro o API name pelo catálogo Steam e chama internamente:
 
 ```powershell
 achievement-bridge steam-local-sync --appid 3751950 --achievement ACObsidian_Ach_10 --timestamp 1787390253
@@ -195,7 +222,7 @@ zig build run -- probe --game-dir "D:\Jogos\MeuJogo"
 zig build run -- host
 ```
 
-`host --once` executa um único ciclo. O detector reconhece Steamworks, GSE-compatible, Ubisoft Connect, Uplay R2, Epic EOS e GOG Galaxy e preserva múltiplos candidatos com confidence score.
+`host --once` executa um único ciclo. O detector reconhece Steamworks, GSE-compatible, RUNE-compatible, Ubisoft Connect, Uplay R2, Epic EOS e GOG Galaxy e preserva múltiplos candidatos com confidence score.
 
 ## Journal
 
@@ -215,6 +242,7 @@ Implementado:
 - proxy ABI compatível com CloudRedirect e IPC para refletir desbloqueios durante a sessão da Steam;
 - parser offline do spool oficial Ubisoft Connect;
 - diagnóstico e watcher de saves Uplay R2-compatible;
+- parser INI, descoberta e watcher de saves RUNE;
 - validação Ed25519 de manifest, SHA-256/assinatura de artefatos e cache atômico com rollback;
 - build e testes no Zig 0.16.0.
 
