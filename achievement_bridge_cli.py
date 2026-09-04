@@ -328,10 +328,15 @@ def start_monitor(args: argparse.Namespace, bridge: Path) -> int:
     )
     parser = EventParser()
     workers = ThreadPoolExecutor(max_workers=2, thread_name_prefix="steam-sync")
+    last_session_heartbeat: str | None = None
     try:
         assert process.stdout is not None
         for raw_line in process.stdout:
             line = raw_line.rstrip("\r\n")
+            if line.startswith("[AchievementBridge] active_game_sessions="):
+                if line == last_session_heartbeat:
+                    continue
+                last_session_heartbeat = line
             log.write(f"BRIDGE {line}")
             event = parser.push(line)
             if event is not None:
