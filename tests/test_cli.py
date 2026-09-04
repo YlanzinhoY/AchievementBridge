@@ -4,7 +4,9 @@ from pathlib import Path
 from achievement_bridge_cli import (
     EventParser,
     best_provider,
+    build_parser,
     classify_support,
+    menu_start_namespace,
     parse_achievement_count,
     parse_installed_games,
     parse_provider_candidates,
@@ -70,6 +72,18 @@ Provider candidates:
         self.assertEqual(2638890, event.app_id)
         self.assertEqual("ACHIEVEMENT_002", event.achievement)
         self.assertFalse(event.recovered)
+
+    def test_interactive_menu_starts_with_safe_monitor_defaults(self) -> None:
+        parser = build_parser()
+        menu_args = parser.parse_args(["--steam-root", "C:\\steam", "menu"])
+        monitor_args = menu_start_namespace(menu_args)
+
+        self.assertEqual("menu", menu_args.command)
+        self.assertEqual("C:\\steam", monitor_args.steam_root)
+        self.assertTrue(monitor_args.no_scan)
+        self.assertTrue(monitor_args.no_notifications)
+        self.assertTrue(monitor_args.native_toast)
+        self.assertFalse(monitor_args.allow_duplicate)
 
 
 if __name__ == "__main__":
