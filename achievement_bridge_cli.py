@@ -20,6 +20,15 @@ from typing import Iterable, TextIO
 SUPPORTED_SYNC_PROVIDERS = ("gse", "rune")
 MONITORED_PROVIDERS = ("ubisoft", "uplay_r2")
 PROVIDER_PRIORITY = ("gse", "rune", "uplay_r2", "ubisoft", "steam", "epic", "gog", "ea", "xbox")
+ANSI = {
+    "reset": "\033[0m",
+    "bold": "\033[1m",
+    "cyan": "\033[96m",
+    "green": "\033[92m",
+    "yellow": "\033[93m",
+    "red": "\033[91m",
+    "dim": "\033[2m",
+}
 
 
 @dataclass(frozen=True)
@@ -246,10 +255,14 @@ def print_game_table(reports: list[SupportReport]) -> None:
 
 
 def other_bridge_process_exists() -> bool:
+    return process_is_running("achievement-bridge.exe")
+
+
+def process_is_running(image_name: str) -> bool:
     if os.name != "nt":
         return False
     result = subprocess.run(
-        ["tasklist", "/FI", "IMAGENAME eq achievement-bridge.exe", "/FO", "CSV", "/NH"],
+        ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -257,7 +270,89 @@ def other_bridge_process_exists() -> bool:
         errors="replace",
         check=False,
     )
-    return '"achievement-bridge.exe"' in result.stdout.lower()
+    return f'"{image_name.lower()}"' in result.stdout.lower()
+
+
+def paint(text: str, style: str) -> str:
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR") is not None:
+        return text
+    return f"{ANSI[style]}{text}{ANSI['reset']}"
+
+
+def clear_screen() -> None:
+    if sys.stdout.isatty():
+        print("\033[2J\033[H", end="")
+
+
+def print_banner() -> None:
+    print(paint("╭────────────────────────────────────────────────────────╮", "cyan"))
+    print(paint("│                 ACHIEVEMENT BRIDGE                     │", "cyan"))
+    print(paint("│          conquistas locais conectadas à Steam          │", "cyan"))
+    print(paint("╰────────────────────────────────────────────────────────╯", "cyan"))
+
+
+def print_status(bridge: Path) -> None:
+    steam = process_is_running("steam.exe")
+    bridge_active = other_bridge_process_exists()
+    print_banner()
+    print()
+    print(f"  Steam     {paint('● ATIVA', 'green') if steam else paint('○ FECHADA', 'red')}")
+    print(f"  Bridge    {paint('● MONITORANDO', 'green') if bridge_active else paint('○ DESLIGADO', 'yellow')}")
+    print(f"  Núcleo    {bridge}")
+    print(f"  Logs      {default_log_path()}")
+
+
+def menu_start_namespace(args: argparse.Namespace) -> argparse.Namespace:
+    return argparse.Namespace(
+        bridge=args.bridge,
+        steam_root=args.steam_root,
+        interval_ms=500,
+        journal=None,
+        log=None,
+        no_file_log=False,
+        no_scan=True,
+        no_notifications=True,
+        native_toast=True,
+        allow_duplicate=False,
+    )
+
+
+def interactive_menu(args: argparse.Namespace, bridge: Path) -> int:
+    while True:
+        clear_screen()
+        print_status(bridge)
+        print()
+        if other_bridge_process_exists():
+            print(paint("  O Bridge já está ativo. Feche a outra instância antes de iniciar por este menu.", "yellow"))
+        print()
+        print(paint("  [1]", "cyan") + " Ativar Bridge e acompanhar logs")
+        print(paint("  [2]", "cyan") + " Ver jogos compatíveis")
+        print(paint("  [3]", "cyan") + " Atualizar status")
+        print(paint("  [0]", "cyan") + " Sair")
+        print()
+        choice = input(paint("  Escolha uma opção: ", "bold")).strip()
+        if choice == "1":
+            if other_bridge_process_exists():
+                input("\n  Já existe um Bridge ativo. Pressione Enter para voltar...")
+                continue
+            clear_screen()
+            print_banner()
+            print(paint("\n  Bridge ativado. Abra seu jogo normalmente.", "green"))
+            print("  Os eventos aparecerão abaixo. Pressione Ctrl+C para voltar ao menu.\n")
+            start_monitor(menu_start_namespace(args), bridge)
+        elif choice == "2":
+            clear_screen()
+            print_banner()
+            print(paint("\n  Analisando a biblioteca Steam...\n", "dim"))
+            reports = inspect_installed_games(bridge, args.steam_root, verify_schema=True)
+            print_game_table(reports)
+            input("\n  Pressione Enter para voltar...")
+        elif choice == "3":
+            continue
+        elif choice in {"0", "q", "sair"}:
+            return 0
+        else:
+            input("\n  Opção inválida. Pressione Enter para tentar novamente...")
 
 
 def sync_event(bridge: Path, event: AchievementEvent, steam_root: str | None, native_toast: bool, log: LogSink) -> None:
@@ -372,6 +467,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steam-root", help="pasta da Steam; normalmente detectada automaticamente")
     subcommands = parser.add_subparsers(dest="command")
 
+    subcommands.add_parser("menu", help="abrir o menu interativo")
+    subcommands.add_parser("status", help="mostrar status da Steam e do Bridge")
+
     games = subcommands.add_parser("games", help="listar compatibilidade dos jogos Steam instalados")
     games.add_argument("--fast", action="store_true", help="não consultar a quantidade de conquistas na Steam")
     games.add_argument("--json", action="store_true", help="emitir resultado estruturado")
@@ -397,9 +495,14 @@ def main(argv: list[str] | None = None) -> int:
     effective_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(effective_argv)
     if args.command is None:
-        args = parser.parse_args([*effective_argv, "start"])
+        args = parser.parse_args([*effective_argv, "menu"])
     try:
         bridge = find_bridge(args.bridge)
+        if args.command == "menu":
+            return interactive_menu(args, bridge)
+        if args.command == "status":
+            print_status(bridge)
+            return 0
         if args.command == "games":
             reports = inspect_installed_games(bridge, args.steam_root, verify_schema=not args.fast)
             if args.json:
