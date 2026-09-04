@@ -79,10 +79,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     }
     var steam_metadata_attempted = std.AutoHashMap(u32, void).init(allocator);
     defer steam_metadata_attempted.deinit();
+    const watch_started_at_ns: i96 = @intCast(std.Io.Clock.real.now(io).nanoseconds);
 
     std.debug.print("[AchievementBridge] provider=gse status=discovering\n", .{});
     while (true) {
-        try discoverNewGames(allocator, io, options, &journal, &tracked, &notifier, &metadata, &steam_metadata_attempted);
+        try discoverNewGames(allocator, io, options, watch_started_at_ns, &journal, &tracked, &notifier, &metadata, &steam_metadata_attempted);
         for (tracked.items) |*game| try checkGame(allocator, io, &journal, game, &notifier, &metadata);
         try std.Io.sleep(io, .fromMilliseconds(options.interval_ms), .awake);
     }
@@ -92,6 +93,7 @@ fn discoverNewGames(
     allocator: std.mem.Allocator,
     io: std.Io,
     options: Options,
+    watch_started_at_ns: i96,
     journal: *Journal,
     tracked: *std.ArrayList(TrackedGame),
     notifier: *?WindowsNotifier,
@@ -118,17 +120,26 @@ fn discoverNewGames(
         const stat = try std.Io.Dir.cwd().statFile(io, candidate.state_file, .{});
         const seen_before = journal.hasSeenGame(candidate.app_id);
         if (!seen_before) {
-            var iterator = current.achievements.iterator();
-            while (iterator.next()) |entry| {
-                if (entry.value_ptr.earned) {
-                    try journal.recordBaseline(candidate.app_id, entry.key_ptr.*, entry.value_ptr.earned_time);
+            if (isLiveFirstSnapshot(stat.mtime.nanoseconds, watch_started_at_ns)) {
+                // A GSE progress file is often created by the first achievement.
+                // When the watcher was already alive before that file appeared,
+                // its unlocked entries are gameplay events, not imported history.
+                // Marking the game first makes a crash recover the event safely.
+                try journal.markGame(candidate.app_id);
+                try replaySnapshot(allocator, io, journal, candidate.app_id, &current, notifier, metadata, false);
+            } else {
+                var iterator = current.achievements.iterator();
+                while (iterator.next()) |entry| {
+                    if (entry.value_ptr.earned) {
+                        try journal.recordBaseline(candidate.app_id, entry.key_ptr.*, entry.value_ptr.earned_time);
+                    }
                 }
+                // The marker is deliberately written last. A crash during baseline
+                // creation will rebuild the baseline instead of replaying old unlocks.
+                try journal.markGame(candidate.app_id);
             }
-            // The marker is deliberately written last. A crash during baseline
-            // creation will rebuild the baseline instead of replaying old unlocks.
-            try journal.markGame(candidate.app_id);
         } else if (options.recover) {
-            try replayMissed(allocator, io, journal, candidate.app_id, &current, notifier, metadata);
+            try replaySnapshot(allocator, io, journal, candidate.app_id, &current, notifier, metadata, true);
         }
         try tracked.append(allocator, .{
             .app_id = candidate.app_id,
@@ -145,7 +156,7 @@ fn discoverNewGames(
     }
 }
 
-fn replayMissed(allocator: std.mem.Allocator, io: std.Io, journal: *Journal, app_id: u32, current: *const snapshot.Snapshot, notifier: *?WindowsNotifier, metadata: *const MetadataCatalog) !void {
+fn replaySnapshot(allocator: std.mem.Allocator, io: std.Io, journal: *Journal, app_id: u32, current: *const snapshot.Snapshot, notifier: *?WindowsNotifier, metadata: *const MetadataCatalog, recovered: bool) !void {
     var iterator = current.achievements.iterator();
     while (iterator.next()) |entry| {
         if (!entry.value_ptr.earned or journal.contains(app_id, entry.key_ptr.*)) continue;
@@ -155,10 +166,18 @@ fn replayMissed(allocator: std.mem.Allocator, io: std.Io, journal: *Journal, app
             .source_id = entry.key_ptr.*,
             .unlocked_at = if (entry.value_ptr.earned_time > 0) entry.value_ptr.earned_time else detected_at,
             .detected_at = detected_at,
-            .recovered = true,
+            .recovered = recovered,
         };
         if (try journal.recordEvent(achievement)) emitEvent(allocator, notifier, metadata, achievement);
     }
+}
+
+fn isLiveFirstSnapshot(file_mtime_ns: i96, watch_started_at_ns: i96) bool {
+    // Windows filesystems may expose a timestamp rounded slightly below the
+    // clock sample taken at watcher startup. A two-second tolerance preserves
+    // a first live unlock without treating normal pre-existing saves as live.
+    const tolerance_ns: i96 = 2 * std.time.ns_per_s;
+    return file_mtime_ns >= watch_started_at_ns - tolerance_ns;
 }
 
 fn checkGame(
@@ -223,4 +242,11 @@ fn emitEvent(allocator: std.mem.Allocator, notifier: *?WindowsNotifier, metadata
     if (notifier.*) |*active| active.show(allocator, achievement, display_name, description, global_percent) catch |err| {
         std.debug.print("[AchievementBridge] notification_error={s}\n", .{@errorName(err)});
     };
+}
+
+test "first GSE snapshot created after watcher start is live" {
+    const started: i96 = 100 * std.time.ns_per_s;
+    try std.testing.expect(isLiveFirstSnapshot(101 * std.time.ns_per_s, started));
+    try std.testing.expect(isLiveFirstSnapshot(99 * std.time.ns_per_s, started));
+    try std.testing.expect(!isLiveFirstSnapshot(90 * std.time.ns_per_s, started));
 }
