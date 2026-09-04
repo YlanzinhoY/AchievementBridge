@@ -24,12 +24,24 @@ No Windows, compile o núcleo e abra a CLI:
 
 ```powershell
 zig build -Doptimize=ReleaseSafe
+.\bridge-cli.cmd
+```
+
+A abertura padrão mostra um menu com o estado da Steam e do Bridge. Escolha `1` para ativar o
+monitor e acompanhar os eventos ao vivo, `2` para consultar a compatibilidade dos jogos instalados
+ou `0` para sair. Nada começa a monitorar até o usuário escolher **Ativar Bridge**.
+
+O log também fica em `%LOCALAPPDATA%\AchievementBridge\bridge-cli.log`. `Ctrl+C` encerra o monitor
+e volta ao menu. A CLI recusa iniciar uma segunda instância por padrão; feche o LuaTools antes de
+usá-la standalone.
+
+Para automação ou uso avançado, o monitor também pode ser iniciado diretamente:
+
+```powershell
 .\bridge-cli.cmd start
 ```
 
-O log também fica em `%LOCALAPPDATA%\AchievementBridge\bridge-cli.log`. `Ctrl+C` encerra o monitor
-de forma controlada. A CLI recusa iniciar uma segunda instância por padrão; feche o LuaTools antes de
-usá-la standalone, ou passe `--allow-duplicate` apenas para diagnóstico.
+Nesse modo, `--allow-duplicate` existe apenas para diagnóstico consciente.
 
 Para listar os jogos instalados:
 
