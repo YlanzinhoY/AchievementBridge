@@ -69,6 +69,29 @@ Quando uma conquista GSE/RUNE é emitida, a CLI relê o arquivo do provider e co
 AppID/API name está desbloqueado antes de escrever na Steam. Primeiro tenta `SetAchievement` +
 `StoreStats`; schemas protegidos usam o cache local nativo como fallback, com backup atômico.
 
+## Instalador Windows
+
+O instalador é gerado com Velopack 1.2.0. A CLI Typer/Rich é congelada em uma pasta standalone pelo
+PyInstaller, portanto o computador do usuário não precisa ter Python, Zig ou .NET instalado. O setup
+é por usuário, cria atalhos no Menu Iniciar e na área de trabalho, registra um desinstalador e já usa o
+formato de releases necessário para atualizações futuras.
+
+Para gerar uma release local a partir dos fontes:
+
+```powershell
+.\scripts\build-installer.ps1 -Version 0.1.0
+```
+
+O script compila e testa o núcleo Zig em `ReleaseSafe`, gera o ícone, empacota a CLI e grava o setup,
+o pacote completo e o feed Velopack em `dist`. Para reconstruir com binários Zig já existentes e
+limpar os artefatos de release anteriores:
+
+```powershell
+.\scripts\build-installer.ps1 -Version 0.1.0 -SkipZigBuild -CleanReleases
+```
+
+As ferramentas de build ficam fixadas em `requirements-build.txt` e `.config/dotnet-tools.json`.
+
 ## GSE / Goldberg-compatible
 
 Descobrir saves conhecidos:
