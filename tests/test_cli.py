@@ -161,7 +161,7 @@ Provider candidates:
         self.assertTrue(monitor_args.native_toast)
         self.assertFalse(monitor_args.allow_duplicate)
 
-    def test_notification_preview_never_requests_a_write(self) -> None:
+    def test_notification_preview_requests_explicit_temporary_write(self) -> None:
         arguments = notification_preview_arguments(
             2638890,
             " ACHIEVEMENT_050 ",
@@ -176,7 +176,7 @@ Provider candidates:
         self.assertIn("--wait-for-game", arguments)
         self.assertNotIn("steam-unlock", arguments)
         self.assertNotIn("steam-local-sync", arguments)
-        self.assertNotIn("--confirm-steam-write", arguments)
+        self.assertIn("--confirm-steam-write", arguments)
         self.assertNotIn("--confirm-local-write", arguments)
 
     def test_notification_preview_requires_game_dir_when_waiting(self) -> None:
