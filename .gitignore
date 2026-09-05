@@ -6,3 +6,5 @@ upc_r2.log
 __pycache__/
 *.py[cod]
 .venv/
+build/installer/
+dist/
