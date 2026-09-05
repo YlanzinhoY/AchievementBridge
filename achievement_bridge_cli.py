@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
@@ -14,21 +13,22 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, TextIO
+from typing import Annotated, Callable, Iterable, TextIO, TypeVar
+
+import typer
+from rich import box
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Prompt
+from rich.table import Table
+from rich.text import Text
 
 
 SUPPORTED_SYNC_PROVIDERS = ("gse", "rune")
 MONITORED_PROVIDERS = ("ubisoft", "uplay_r2")
 PROVIDER_PRIORITY = ("gse", "rune", "uplay_r2", "ubisoft", "steam", "epic", "gog", "ea", "xbox")
-ANSI = {
-    "reset": "\033[0m",
-    "bold": "\033[1m",
-    "cyan": "\033[96m",
-    "green": "\033[92m",
-    "yellow": "\033[93m",
-    "red": "\033[91m",
-    "dim": "\033[2m",
-}
+console = Console(highlight=False)
+ResultType = TypeVar("ResultType")
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,35 @@ class AchievementEvent:
     achievement: str
     timestamp: int | None
     recovered: bool
+
+
+@dataclass(frozen=True)
+class AvailableAchievement:
+    index: int
+    api_name: str
+    unlocked: bool
+    name: str
+    global_percent: float
+
+
+@dataclass(frozen=True)
+class CliOptions:
+    bridge: str | None = None
+    steam_root: str | None = None
+
+
+@dataclass(frozen=True)
+class MonitorOptions:
+    bridge: str | None
+    steam_root: str | None
+    interval_ms: int
+    journal: str | None
+    log: str | None
+    no_file_log: bool
+    no_scan: bool
+    no_notifications: bool
+    native_toast: bool
+    allow_duplicate: bool
 
 
 class EventParser:
@@ -192,14 +221,47 @@ def parse_achievement_count(output: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def parse_available_achievements(output: str) -> list[AvailableAchievement]:
+    achievements: list[AvailableAchievement] = []
+    pattern = re.compile(
+        r"^\[(\d+)\]\s+(\S+)\s+(unlocked|locked)\s+name=(.*?)"
+        r"(?:\s+unlock_time=\d+)?\s+global=([0-9]+(?:\.[0-9]+)?)%$"
+    )
+    for line in output.splitlines():
+        match = pattern.match(line)
+        if match is None:
+            continue
+        achievements.append(AvailableAchievement(
+            index=int(match.group(1)),
+            api_name=match.group(2),
+            unlocked=match.group(3) == "unlocked",
+            name=match.group(4),
+            global_percent=float(match.group(5)),
+        ))
+    return achievements
+
+
 def classify_support(provider: str, confidence: int, achievements: int | None) -> str:
     if provider in SUPPORTED_SYNC_PROVIDERS and confidence >= 60:
-        return "PRONTO" if achievements is None or achievements > 0 else "SEM SCHEMA"
+        return "COMPLETO" if achievements is None or achievements > 0 else "SEM CATÁLOGO"
     if provider in MONITORED_PROVIDERS and confidence >= 60:
-        return "MONITORA"
+        return "SÓ DETECTA"
     if provider == "steam" and confidence >= 50:
         return "NATIVO"
-    return "NÃO SUPORTADO"
+    return "SEM SUPORTE"
+
+
+def read_available_achievements(bridge: Path, app_id: int, steam_root: str | None) -> list[AvailableAchievement]:
+    arguments = ["steam-read", "--appid", str(app_id)]
+    if steam_root:
+        arguments += ["--steam-root", steam_root]
+    result = run_bridge(bridge, arguments, timeout=45)
+    if result.returncode != 0:
+        raise RuntimeError(result.stdout.strip() or f"não foi possível ler as conquistas do AppID {app_id}")
+    achievements = parse_available_achievements(result.stdout)
+    if not achievements:
+        raise RuntimeError(f"a Steam não retornou um catálogo de conquistas para o AppID {app_id}")
+    return achievements
 
 
 def inspect_installed_games(bridge: Path, steam_root: str | None, verify_schema: bool = True) -> list[SupportReport]:
@@ -234,24 +296,59 @@ def inspect_installed_games(bridge: Path, steam_root: str | None, verify_schema:
 
 
 def print_game_table(reports: list[SupportReport]) -> None:
-    headers = ("APPID", "STATUS", "PROVEDOR", "CONF.", "CONQ.", "JOGO")
-    rows = [
-        (
+    table = Table(box=box.ROUNDED, header_style="bold cyan", border_style="bright_black")
+    table.add_column("AppID", style="dim", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Provedor", no_wrap=True)
+    table.add_column("Conf.", justify="right", no_wrap=True)
+    table.add_column("Conq.", justify="right", no_wrap=True)
+    table.add_column("Jogo", overflow="fold")
+    status_styles = {
+        "COMPLETO": "bold green",
+        "NATIVO": "cyan",
+        "SÓ DETECTA": "yellow",
+        "SEM CATÁLOGO": "yellow",
+        "SEM SUPORTE": "red",
+    }
+    for report in reports:
+        table.add_row(
             str(report.game.app_id),
-            report.status,
+            Text(report.status, style=status_styles.get(report.status, "")),
             report.provider,
             f"{report.confidence}%" if report.confidence else "-",
             str(report.achievement_count) if report.achievement_count is not None else "-",
             report.game.name,
         )
-        for report in reports
-    ]
-    widths = [max(len(headers[index]), *(len(row[index]) for row in rows)) for index in range(len(headers))]
-    print("  ".join(headers[index].ljust(widths[index]) for index in range(len(headers))))
-    print("  ".join("-" * width for width in widths))
-    for row in rows:
-        print("  ".join(row[index].ljust(widths[index]) for index in range(len(headers))))
-    print("\nPRONTO = monitora e sincroniza | NATIVO = Steam já cuida | MONITORA = evento sem sync standalone")
+    console.print(table)
+    console.print("[bold green]COMPLETO[/]  Bridge detecta e sincroniza com a Steam")
+    console.print("[cyan]NATIVO[/]    O próprio jogo usa Steamworks; não precisa do Bridge")
+    console.print("[yellow]SÓ DETECTA[/] O Bridge vê o evento, mas a CLI ainda não sincroniza sozinha")
+    console.print("[yellow]SEM CATÁLOGO[/] O provedor existe, mas a Steam não retornou conquistas")
+    console.print("[red]SEM SUPORTE[/] Provedor de conquistas ainda não implementado")
+
+
+def print_achievement_table(game: InstalledGame, achievements: list[AvailableAchievement]) -> None:
+    table = Table(
+        title=f"{game.name}  •  {len(achievements)} conquistas",
+        box=box.ROUNDED,
+        header_style="bold cyan",
+        border_style="bright_black",
+    )
+    table.add_column("#", justify="right", style="dim", no_wrap=True)
+    table.add_column("Estado", no_wrap=True)
+    table.add_column("Conquista")
+    table.add_column("API name", style="dim", overflow="fold")
+    table.add_column("Global", justify="right", no_wrap=True)
+    for achievement in achievements:
+        state = Text("✓ Obtida", style="bold green") if achievement.unlocked else Text("○ Bloqueada", style="dim")
+        table.add_row(
+            str(achievement.index + 1),
+            state,
+            achievement.name,
+            achievement.api_name,
+            f"{achievement.global_percent:.1f}%",
+        )
+    console.print(table)
 
 
 def other_bridge_process_exists() -> bool:
@@ -273,37 +370,37 @@ def process_is_running(image_name: str) -> bool:
     return f'"{image_name.lower()}"' in result.stdout.lower()
 
 
-def paint(text: str, style: str) -> str:
-    if not sys.stdout.isatty() or os.environ.get("NO_COLOR") is not None:
-        return text
-    return f"{ANSI[style]}{text}{ANSI['reset']}"
-
-
 def clear_screen() -> None:
-    if sys.stdout.isatty():
-        print("\033[2J\033[H", end="")
+    if console.is_terminal:
+        console.clear()
 
 
 def print_banner() -> None:
-    print(paint("╭────────────────────────────────────────────────────────╮", "cyan"))
-    print(paint("│                 ACHIEVEMENT BRIDGE                     │", "cyan"))
-    print(paint("│          conquistas locais conectadas à Steam          │", "cyan"))
-    print(paint("╰────────────────────────────────────────────────────────╯", "cyan"))
+    heading = Text.assemble(
+        ("ACHIEVEMENT BRIDGE", "bold bright_cyan"),
+        "\n",
+        ("Conquistas locais conectadas à Steam", "dim"),
+    )
+    heading.justify = "center"
+    console.print(Panel(heading, border_style="cyan", padding=(1, 6)))
 
 
 def print_status(bridge: Path) -> None:
     steam = process_is_running("steam.exe")
     bridge_active = other_bridge_process_exists()
     print_banner()
-    print()
-    print(f"  Steam     {paint('● ATIVA', 'green') if steam else paint('○ FECHADA', 'red')}")
-    print(f"  Bridge    {paint('● MONITORANDO', 'green') if bridge_active else paint('○ DESLIGADO', 'yellow')}")
-    print(f"  Núcleo    {bridge}")
-    print(f"  Logs      {default_log_path()}")
+    status = Table.grid(padding=(0, 2))
+    status.add_column(style="bold")
+    status.add_column()
+    status.add_row("Steam", "[bold green]● ATIVA[/]" if steam else "[red]○ FECHADA[/]")
+    status.add_row("Bridge", "[bold green]● MONITORANDO[/]" if bridge_active else "[yellow]○ DESLIGADO[/]")
+    status.add_row("Núcleo", str(bridge))
+    status.add_row("Logs", default_log_path())
+    console.print(Panel(status, title="[bold]Status[/]", border_style="bright_black"))
 
 
-def menu_start_namespace(args: argparse.Namespace) -> argparse.Namespace:
-    return argparse.Namespace(
+def menu_start_options(args: CliOptions) -> MonitorOptions:
+    return MonitorOptions(
         bridge=args.bridge,
         steam_root=args.steam_root,
         interval_ms=500,
@@ -317,42 +414,101 @@ def menu_start_namespace(args: argparse.Namespace) -> argparse.Namespace:
     )
 
 
-def interactive_menu(args: argparse.Namespace, bridge: Path) -> int:
+def show_available_achievements(args: CliOptions, bridge: Path) -> None:
+    clear_screen()
+    print_banner()
+    console.print("\n[dim]Procurando jogos com catálogo de conquistas...[/]\n")
+    reports = inspect_installed_games(bridge, args.steam_root, verify_schema=False)
+    eligible = [
+        report for report in reports
+        if report.status in {"COMPLETO", "NATIVO", "SÓ DETECTA"}
+    ]
+    if not eligible:
+        console.print(Panel("Nenhum jogo compatível foi encontrado.", border_style="yellow"))
+        console.input("\nPressione Enter para voltar...")
+        return
+
+    choices = Table(box=box.SIMPLE, header_style="bold cyan")
+    choices.add_column("Opção", justify="right", style="bright_cyan")
+    choices.add_column("Jogo")
+    choices.add_column("Status")
+    choices.add_column("AppID", style="dim")
+    for index, report in enumerate(eligible, start=1):
+        choices.add_row(str(index), report.game.name, report.status, str(report.game.app_id))
+    choices.add_row("0", "Voltar", "", "")
+    console.print(choices)
+    selected = Prompt.ask(
+        "[bold]Escolha um jogo[/]",
+        choices=tuple(str(index) for index in range(0, len(eligible) + 1)),
+        default="0",
+    )
+    if selected == "0":
+        return
+
+    game = eligible[int(selected) - 1].game
+    clear_screen()
+    print_banner()
+    console.print(f"\n[dim]Lendo catálogo de {game.name}...[/]\n")
+    try:
+        achievements = read_available_achievements(bridge, game.app_id, args.steam_root)
+    except RuntimeError as error:
+        console.print(Panel(str(error), title="[bold red]Catálogo indisponível[/]", border_style="red"))
+    else:
+        print_achievement_table(game, achievements)
+    console.input("\nPressione Enter para voltar...")
+
+
+def interactive_menu(args: CliOptions, bridge: Path) -> int:
     while True:
         clear_screen()
         print_status(bridge)
-        print()
         if other_bridge_process_exists():
-            print(paint("  O Bridge já está ativo. Feche a outra instância antes de iniciar por este menu.", "yellow"))
-        print()
-        print(paint("  [1]", "cyan") + " Ativar Bridge e acompanhar logs")
-        print(paint("  [2]", "cyan") + " Ver jogos compatíveis")
-        print(paint("  [3]", "cyan") + " Atualizar status")
-        print(paint("  [0]", "cyan") + " Sair")
-        print()
-        choice = input(paint("  Escolha uma opção: ", "bold")).strip()
+            console.print(Panel(
+                "O Bridge já está ativo. Feche a outra instância antes de iniciar por este menu.",
+                border_style="yellow",
+            ))
+        actions = Table.grid(padding=(0, 2))
+        actions.add_column(style="bold bright_cyan", justify="right")
+        actions.add_column()
+        actions.add_row("[1]", "Ativar Bridge e acompanhar logs")
+        actions.add_row("[2]", "Ver jogos compatíveis")
+        actions.add_row("[3]", "Ver conquistas disponíveis")
+        actions.add_row("[4]", "Atualizar status")
+        actions.add_row("[0]", "Sair")
+        console.print(Panel(actions, title="[bold]O que você quer fazer?[/]", border_style="cyan"))
+        try:
+            choice = Prompt.ask(
+                "[bold]Escolha uma opção[/]",
+                choices=("1", "2", "3", "4", "0"),
+                default="1",
+            )
+        except (EOFError, KeyboardInterrupt):
+            return 0
         if choice == "1":
             if other_bridge_process_exists():
-                input("\n  Já existe um Bridge ativo. Pressione Enter para voltar...")
+                console.input("\n[yellow]Já existe um Bridge ativo.[/] Pressione Enter para voltar...")
                 continue
             clear_screen()
             print_banner()
-            print(paint("\n  Bridge ativado. Abra seu jogo normalmente.", "green"))
-            print("  Os eventos aparecerão abaixo. Pressione Ctrl+C para voltar ao menu.\n")
-            start_monitor(menu_start_namespace(args), bridge)
+            console.print(Panel(
+                "[bold green]Bridge ativado.[/] Abra seu jogo normalmente.\n"
+                "Os eventos aparecerão abaixo. Pressione [bold]Ctrl+C[/] para voltar ao menu.",
+                border_style="green",
+            ))
+            start_monitor(menu_start_options(args), bridge)
         elif choice == "2":
             clear_screen()
             print_banner()
-            print(paint("\n  Analisando a biblioteca Steam...\n", "dim"))
+            console.print("\n[dim]Analisando a biblioteca Steam...[/]\n")
             reports = inspect_installed_games(bridge, args.steam_root, verify_schema=True)
             print_game_table(reports)
-            input("\n  Pressione Enter para voltar...")
+            console.input("\nPressione Enter para voltar...")
         elif choice == "3":
+            show_available_achievements(args, bridge)
+        elif choice == "4":
             continue
-        elif choice in {"0", "q", "sair"}:
+        elif choice == "0":
             return 0
-        else:
-            input("\n  Opção inválida. Pressione Enter para tentar novamente...")
 
 
 def sync_event(bridge: Path, event: AchievementEvent, steam_root: str | None, native_toast: bool, log: LogSink) -> None:
@@ -391,7 +547,7 @@ def sync_event(bridge: Path, event: AchievementEvent, steam_root: str | None, na
         )
 
 
-def start_monitor(args: argparse.Namespace, bridge: Path) -> int:
+def start_monitor(args: MonitorOptions, bridge: Path) -> int:
     if other_bridge_process_exists() and not args.allow_duplicate:
         print("Já existe um Achievement Bridge rodando (provavelmente iniciado pelo LuaTools).")
         print("Feche o LuaTools ou use --allow-duplicate conscientemente.")
@@ -461,71 +617,147 @@ def default_log_path() -> str:
     return str(Path(base) / "AchievementBridge" / "bridge-cli.log")
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="achievement-bridge-cli", description="Console aberta do Achievement Bridge")
-    parser.add_argument("--bridge", help="caminho de achievement-bridge.exe")
-    parser.add_argument("--steam-root", help="pasta da Steam; normalmente detectada automaticamente")
-    subcommands = parser.add_subparsers(dest="command")
-
-    subcommands.add_parser("menu", help="abrir o menu interativo")
-    subcommands.add_parser("status", help="mostrar status da Steam e do Bridge")
-
-    games = subcommands.add_parser("games", help="listar compatibilidade dos jogos Steam instalados")
-    games.add_argument("--fast", action="store_true", help="não consultar a quantidade de conquistas na Steam")
-    games.add_argument("--json", action="store_true", help="emitir resultado estruturado")
-
-    start = subcommands.add_parser("start", help="iniciar monitor, logs e sincronização Steam")
-    start.add_argument("--interval-ms", type=int, default=500)
-    start.add_argument("--journal")
-    start.add_argument("--log")
-    start.add_argument("--no-file-log", action="store_true")
-    start.add_argument("--no-scan", action="store_true")
-    start.add_argument("--no-notifications", action="store_true")
-    start.add_argument("--no-native-toast", action="store_false", dest="native_toast")
-    start.add_argument("--allow-duplicate", action="store_true")
-    start.set_defaults(native_toast=True)
-    return parser
+app = typer.Typer(
+    name="achievement-bridge-cli",
+    help="[bold cyan]Achievement Bridge[/] — conquistas locais conectadas à Steam.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+    rich_markup_mode="rich",
+    pretty_exceptions_show_locals=False,
+)
 
 
-def main(argv: list[str] | None = None) -> int:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    parser = build_parser()
-    effective_argv = list(sys.argv[1:] if argv is None else argv)
-    args = parser.parse_args(effective_argv)
-    if args.command is None:
-        args = parser.parse_args([*effective_argv, "menu"])
+def resolve_bridge(explicit: str | None) -> Path:
     try:
-        bridge = find_bridge(args.bridge)
-        if args.command == "menu":
-            return interactive_menu(args, bridge)
-        if args.command == "status":
-            print_status(bridge)
-            return 0
-        if args.command == "games":
-            reports = inspect_installed_games(bridge, args.steam_root, verify_schema=not args.fast)
-            if args.json:
-                print(json.dumps([
-                    {
-                        "appid": report.game.app_id,
-                        "name": report.game.name,
-                        "directory": str(report.game.directory),
-                        "provider": report.provider,
-                        "confidence": report.confidence,
-                        "achievements": report.achievement_count,
-                        "status": report.status,
-                    }
-                    for report in reports
-                ], ensure_ascii=False, indent=2))
-            else:
-                print_game_table(reports)
-            return 0
-        return start_monitor(args, bridge)
+        return find_bridge(explicit)
+    except FileNotFoundError as error:
+        console.print(Panel(str(error), title="[bold red]Não foi possível iniciar[/]", border_style="red"))
+        raise typer.Exit(1) from error
+
+
+def get_cli_options(context: typer.Context) -> CliOptions:
+    assert isinstance(context.obj, CliOptions)
+    return context.obj
+
+
+def exit_on_failure(action: Callable[[], ResultType]) -> ResultType:
+    try:
+        return action()
     except (FileNotFoundError, RuntimeError, subprocess.TimeoutExpired) as error:
-        print(f"Erro: {error}", file=sys.stderr)
-        return 1
+        console.print(Panel(str(error), title="[bold red]Erro[/]", border_style="red"))
+        raise typer.Exit(1) from error
+
+
+@app.callback(invoke_without_command=True)
+def application(
+    context: typer.Context,
+    bridge: Annotated[str | None, typer.Option(help="Caminho de achievement-bridge.exe")] = None,
+    steam_root: Annotated[str | None, typer.Option(help="Pasta da Steam; normalmente detectada")] = None,
+) -> None:
+    """Abra o menu ou use um comando diretamente para automação."""
+    options = CliOptions(bridge=bridge, steam_root=steam_root)
+    context.obj = options
+    if context.invoked_subcommand is None:
+        result = exit_on_failure(lambda: interactive_menu(options, resolve_bridge(bridge)))
+        if result:
+            raise typer.Exit(result)
+
+
+@app.command("menu")
+def menu_command(context: typer.Context) -> None:
+    """Abra o menu interativo e escolha quando ativar o Bridge."""
+    options = get_cli_options(context)
+    result = exit_on_failure(lambda: interactive_menu(options, resolve_bridge(options.bridge)))
+    if result:
+        raise typer.Exit(result)
+
+
+@app.command("status")
+def status_command(context: typer.Context) -> None:
+    """Mostre o estado atual da Steam e do Bridge."""
+    options = get_cli_options(context)
+    exit_on_failure(lambda: print_status(resolve_bridge(options.bridge)))
+
+
+@app.command("games")
+def games_command(
+    context: typer.Context,
+    fast: Annotated[bool, typer.Option("--fast", help="Não consultar quantidades na Steam")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emitir resultado JSON")] = False,
+) -> None:
+    """Liste a compatibilidade dos jogos Steam instalados."""
+    options = get_cli_options(context)
+    bridge = resolve_bridge(options.bridge)
+    reports = exit_on_failure(
+        lambda: inspect_installed_games(bridge, options.steam_root, verify_schema=not fast)
+    )
+    if json_output:
+        print(json.dumps([
+            {
+                "appid": report.game.app_id,
+                "name": report.game.name,
+                "directory": str(report.game.directory),
+                "provider": report.provider,
+                "confidence": report.confidence,
+                "achievements": report.achievement_count,
+                "status": report.status,
+            }
+            for report in reports
+        ], ensure_ascii=False, indent=2))
+    else:
+        print_game_table(reports)
+
+
+@app.command("achievements")
+def achievements_command(
+    context: typer.Context,
+    app_id: Annotated[int, typer.Argument(help="Steam AppID do jogo")],
+) -> None:
+    """Mostre o catálogo de conquistas disponível para um jogo."""
+    options = get_cli_options(context)
+    bridge = resolve_bridge(options.bridge)
+    reports = exit_on_failure(lambda: inspect_installed_games(bridge, options.steam_root, verify_schema=False))
+    game = next(
+        (report.game for report in reports if report.game.app_id == app_id),
+        InstalledGame(app_id=app_id, name=f"AppID {app_id}", directory=Path()),
+    )
+    achievements = exit_on_failure(lambda: read_available_achievements(bridge, app_id, options.steam_root))
+    print_achievement_table(game, achievements)
+
+
+@app.command("start")
+def start_command(
+    context: typer.Context,
+    interval_ms: Annotated[int, typer.Option(min=100, help="Intervalo do monitor em milissegundos")] = 500,
+    journal: Annotated[str | None, typer.Option(help="Caminho alternativo do journal")] = None,
+    log: Annotated[str | None, typer.Option(help="Caminho alternativo do log")] = None,
+    no_file_log: Annotated[bool, typer.Option("--no-file-log", help="Não salvar log em arquivo")] = False,
+    no_scan: Annotated[bool, typer.Option("--no-scan", help="Não analisar a biblioteca ao iniciar")] = False,
+    no_notifications: Annotated[bool, typer.Option("--no-notifications", help="Desativar popup próprio")] = False,
+    no_native_toast: Annotated[bool, typer.Option("--no-native-toast", help="Desativar toast Steam experimental")] = False,
+    allow_duplicate: Annotated[bool, typer.Option("--allow-duplicate", help="Permitir outra instância (diagnóstico)")] = False,
+) -> None:
+    """Inicie o monitor diretamente, sem passar pelo menu."""
+    options = get_cli_options(context)
+    monitor = MonitorOptions(
+        bridge=options.bridge,
+        steam_root=options.steam_root,
+        interval_ms=interval_ms,
+        journal=journal,
+        log=log,
+        no_file_log=no_file_log,
+        no_scan=no_scan,
+        no_notifications=no_notifications,
+        native_toast=not no_native_toast,
+        allow_duplicate=allow_duplicate,
+    )
+    result = exit_on_failure(lambda: start_monitor(monitor, resolve_bridge(options.bridge)))
+    if result:
+        raise typer.Exit(result)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    app(prog_name="achievement-bridge-cli")
