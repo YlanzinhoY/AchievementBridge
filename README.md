@@ -2,7 +2,7 @@
 
 Bridge de conquistas Windows-only em Zig 0.16.0. Ele detecta jogos e runtimes, acompanha conquistas locais de GSE/Goldberg, RUNE, Steam, Ubisoft Connect e Uplay R2-compatible, normaliza os eventos, mantém um journal resiliente e mostra notificações nativas do Windows.
 
-O acesso direto ao `ISteamUserStats` é somente leitura por padrão. As exceções de escrita são o comando manual `steam-unlock`, que exige `--confirm-steam-write`, e os syncs GSE/RUNE verificados, que só prosseguem após reler o save e comprovar o desbloqueio para o mesmo AppID/API name. Separadamente, a integração LuaTools e a CLI standalone sincronizam cada evento real do provider com o cache local da Steam como fallback. Uma tentativa opt-in de toast do Steam Overlay está disponível como experimento e é descrita abaixo.
+O acesso direto ao `ISteamUserStats` é somente leitura por padrão. As exceções de escrita são o comando manual `steam-unlock`, o simulador transacional de toast e os syncs GSE/RUNE verificados. O simulador e o desbloqueio manual exigem `--confirm-steam-write`; os syncs só prosseguem após reler o save e comprovar o desbloqueio para o mesmo AppID/API name. Separadamente, a integração LuaTools e a CLI standalone sincronizam cada evento real do provider com o cache local da Steam como fallback. Uma tentativa opt-in de toast de progresso do Steam Overlay também está disponível como experimento e é descrita abaixo.
 
 ## Compilar
 
@@ -30,8 +30,8 @@ zig build -Doptimize=ReleaseSafe
 
 A abertura padrão mostra um menu com o estado da Steam e do Bridge. Escolha `1` para ativar o
 monitor e acompanhar os eventos ao vivo, `2` para consultar a compatibilidade dos jogos instalados,
-`3` para escolher um jogo e ver suas conquistas disponíveis ou `0` para sair. Nada começa a monitorar
-até o usuário escolher **Ativar Bridge**.
+`3` para escolher um jogo e ver suas conquistas disponíveis, `4` para simular um popup nativo da
+Steam ou `0` para sair. Nada começa a monitorar até o usuário escolher **Ativar Bridge**.
 
 O log também fica em `%LOCALAPPDATA%\AchievementBridge\bridge-cli.log`. `Ctrl+C` encerra o monitor
 e volta ao menu. A CLI recusa iniciar uma segunda instância por padrão; feche o LuaTools antes de
@@ -63,6 +63,34 @@ O catálogo de um jogo também pode ser consultado diretamente pelo AppID:
 
 ```powershell
 .\bridge-cli.cmd achievements 2638890
+```
+
+Uma prévia visual pode ser solicitada pelo menu ou diretamente pelo API name:
+
+```powershell
+.\bridge-cli.cmd simulate-popup 2638890 ACHIEVEMENT_050
+```
+
+O simulador produz o toast real de desbloqueio sem exigir que o jogo esteja aberto. Para uma
+conquista que ainda esteja bloqueada, ele chama `SetAchievement + StoreStats`, aguarda o callback e
+mantém o estado por pelo menos 15 segundos. Em seguida chama `ClearAchievement + StoreStats`, aguarda o
+segundo callback, recarrega os stats e só confirma o teste quando a conquista voltou a ficar
+bloqueada. Conquistas já obtidas não aparecem na seleção e são recusadas pelo núcleo para preservar
+o estado e o timestamp legítimos. O menu é a confirmação explícita da transação; no comando Zig de
+baixo nível é obrigatório informar `--confirm-steam-write`.
+
+Se a Steam entregar um callback atrasado ou aplicar rate limit, cada fase drena callbacks antigos e
+faz até três tentativas controladas. Se o processo falhar depois do `SetAchievement`, o Bridge ainda
+tenta o rollback no bloco de limpeza.
+Durante os poucos segundos da prévia, o desbloqueio é enviado à Steam de verdade; portanto esse modo
+deve ser usado apenas para testes conscientes. O simulador não altera saves nem usa popup do Windows.
+No menu interativo, depois de cada rollback confirmado a CLI atualiza o catálogo e volta diretamente
+à lista de conquistas do mesmo jogo. É possível repetir o teste ou escolher `Trocar de jogo` sem
+retornar ao menu principal.
+Para opcionalmente aguardar um jogo abrir antes da transação:
+
+```powershell
+.\bridge-cli.cmd simulate-popup 2638890 ACHIEVEMENT_050 --wait-for-game --game-dir "D:\SteamLibrary\steamapps\common\OnimushaWotS"
 ```
 
 Quando uma conquista GSE/RUNE é emitida, a CLI relê o arquivo do provider e comprova que o mesmo
@@ -284,16 +312,16 @@ Quando houver uma versão Steam equivalente, `--appid` habilita o mapper exato p
 zig build run -- uplay-r2-watch --appid 3751950
 ```
 
-É possível conferir o popup sem alterar o estado da Steam nem do save:
+É possível conferir o popup nativo real com desbloqueio temporário e rollback:
 
 ```powershell
-zig build run -- notify-test --appid 3751950 --achievement ACObsidian_Ach_10
+zig build run -- notify-test --appid 3751950 --achievement ACObsidian_Ach_10 --confirm-steam-write
 ```
 
 Para disparar essa prévia somente quando o executável do jogo abrir:
 
 ```powershell
-zig build run -- notify-test --appid 3751950 --achievement ACObsidian_Ach_10 --wait-for-game --game-dir "D:\Jogos\MeuJogo"
+zig build run -- notify-test --appid 3751950 --achievement ACObsidian_Ach_10 --confirm-steam-write --wait-for-game --game-dir "D:\Jogos\MeuJogo"
 ```
 
 O número no API name é apenas o ID interno. O popup omite esse detalhe e identifica o percentual lido da Steam como raridade global, não como progresso pessoal.

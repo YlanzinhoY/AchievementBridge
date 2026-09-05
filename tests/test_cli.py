@@ -16,6 +16,7 @@ from achievement_bridge_cli import (
     configure_opensteamtool,
     ensure_steam_host,
     menu_start_options,
+    notification_preview_arguments,
     parse_achievement_count,
     parse_available_achievements,
     parse_installed_games,
@@ -36,6 +37,7 @@ class CliParsingTests(unittest.TestCase):
         self.assertEqual(0, result.exit_code)
         self.assertIn("achievements", result.stdout)
         self.assertIn("games", result.stdout)
+        self.assertIn("simulate-popup", result.stdout)
         self.assertIn("start", result.stdout)
         self.assertIn("setup", result.stdout)
 
@@ -158,6 +160,65 @@ Provider candidates:
         self.assertTrue(monitor_args.no_notifications)
         self.assertTrue(monitor_args.native_toast)
         self.assertFalse(monitor_args.allow_duplicate)
+
+    def test_notification_preview_requests_explicit_temporary_write(self) -> None:
+        arguments = notification_preview_arguments(
+            2638890,
+            " ACHIEVEMENT_050 ",
+            "C:\\steam",
+            duration_ms=9000,
+            wait_for_game_dir="D:\\SteamLibrary\\steamapps\\common\\OnimushaWotS",
+        )
+
+        self.assertEqual("notify-test", arguments[0])
+        self.assertIn("ACHIEVEMENT_050", arguments)
+        self.assertIn("--duration-ms", arguments)
+        self.assertIn("--wait-for-game", arguments)
+        self.assertNotIn("steam-unlock", arguments)
+        self.assertNotIn("steam-local-sync", arguments)
+        self.assertIn("--confirm-steam-write", arguments)
+        self.assertNotIn("--confirm-local-write", arguments)
+
+    def test_notification_preview_requires_game_dir_when_waiting(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "pasta do jogo"):
+            notification_preview_arguments(2638890, "ACHIEVEMENT_050", None, wait_for_game_dir="")
+
+    def test_popup_menu_returns_to_achievement_list_after_preview(self) -> None:
+        report = cli.SupportReport(
+            game=cli.InstalledGame(2638890, "Onimusha: Way of the Sword", Path("D:\\OnimushaWotS")),
+            provider="gse",
+            confidence=100,
+            achievement_count=52,
+            status="COMPLETO",
+        )
+        achievement = cli.AvailableAchievement(
+            index=0,
+            api_name="ACHIEVEMENT_001",
+            unlocked=False,
+            name="Inigualável",
+            global_percent=0.0,
+        )
+
+        with (
+            patch.object(cli, "inspect_installed_games", return_value=[report]),
+            patch.object(cli, "read_available_achievements", return_value=[achievement]) as read,
+            patch.object(cli, "request_notification_preview") as preview,
+            patch.object(cli, "clear_screen"),
+            patch.object(cli, "print_banner"),
+            patch.object(cli.console, "print"),
+            patch.object(cli.console, "status") as status,
+            patch.object(cli.Prompt, "ask", side_effect=["1", "1", "0", "0"]),
+        ):
+            cli.simulate_popup(CliOptions(steam_root="C:\\steam"), Path("achievement-bridge.exe"))
+
+        self.assertEqual(2, read.call_count)
+        preview.assert_called_once_with(
+            Path("achievement-bridge.exe"),
+            2638890,
+            "ACHIEVEMENT_001",
+            "C:\\steam",
+        )
+        status.assert_called_once()
 
 
 if __name__ == "__main__":

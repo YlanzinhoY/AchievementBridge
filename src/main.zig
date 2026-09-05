@@ -438,6 +438,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (cli.command == .notify_test) {
+        if (!cli.confirm_steam_write) return error.TemporarySteamWriteConfirmationRequired;
         const app_id = cli.app_id orelse return error.MissingAppId;
         const wanted = cli.achievement_id orelse return error.MissingAchievement;
         if (cli.wait_for_game) {
@@ -447,23 +448,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("[NotificationPreview] status=game_detected\n", .{});
         }
         const steam_root = if (cli.steam_root) |root| try allocator.dupe(u8, root) else try bridge.detector.steam_install.findSteamRoot(allocator, init.io);
-        var session = try bridge.steam.adapter.connect(allocator, app_id, steam_root);
-        defer session.close();
-        var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
-        defer achievements.deinit();
-        const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
-        const now = unixNow(init.io);
-        var notifier = try bridge.notifications.windows.Notifier.init();
-        defer notifier.deinit();
-        try notifier.show(allocator, .{
-            .app_id = app_id,
-            .source_id = numericSuffix(achievement.api_name) orelse achievement.api_name,
-            .provider = .uplay_r2,
-            .unlocked_at = now,
-            .detected_at = now,
-        }, achievement.name, achievement.description, achievement.global_percent);
-        std.debug.print("[NotificationPreview] appid={d} achievement={s} name={s} duration_ms={d}\n", .{ app_id, achievement.api_name, achievement.name, cli.duration_ms });
-        try std.Io.sleep(init.io, .fromMilliseconds(cli.duration_ms), .awake);
+        try simulateSteamNotification(allocator, init.io, app_id, steam_root, wanted, cli.duration_ms);
         return;
     }
 
@@ -807,7 +792,7 @@ fn printHelp() void {
         \\  achievement-bridge uplay-r2-arm-replay --appid R2_PRODUCT_ID --achievement ID --confirm-local-write
         \\  achievement-bridge uplay-r2-scan [--root SAVE_PATH]
         \\  achievement-bridge uplay-r2-watch [--root SAVE_PATH] [--appid STEAM_ID]
-        \\  achievement-bridge notify-test --appid ID --achievement API_NAME [--wait-for-game --game-dir PATH]
+        \\  achievement-bridge notify-test --appid ID --achievement API_NAME --confirm-steam-write
         \\
         \\Sem --root, observa automaticamente:
         \\  %APPDATA%\\GSE Saves
@@ -822,7 +807,7 @@ fn printHelp() void {
         \\  --catalog PATH     Catalogo ordenado para gerar achievements_schema.json
         \\  --achievement ID   API name ou sufixo numerico para a previa da notificacao
         \\  --timestamp UNIX   Momento original do unlock usado pela sincronizacao local automatica
-        \\  --duration-ms N    Tempo da previa na bandeja (1000-60000; padrao: 7000)
+        \\  --duration-ms N    Tempo antes do rollback da previa (1000-60000; padrao: 7000)
         \\  --wait-for-game    Aguardar um processo do diretorio do jogo antes da previa
         \\  --confirm-steam-write Confirmacao obrigatoria para alterar conquistas da conta Steam
         \\  --confirm-local-write Confirmacao obrigatoria para alterar estado local ou o store local
@@ -925,6 +910,34 @@ fn findAchievement(items: []const bridge.steam.user_stats.AchievementState, want
     return null;
 }
 
+fn simulateSteamNotification(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    app_id: u32,
+    steam_root: []const u8,
+    wanted: []const u8,
+    duration_ms: u32,
+) !void {
+    var session = try bridge.steam.adapter.connect(allocator, app_id, steam_root);
+    defer session.close();
+    try session.client.loadCurrentUserStats(io, app_id, 5000);
+    var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
+    defer achievements.deinit();
+    const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
+    if (achievement.unlocked) return error.AchievementAlreadyUnlockedForPreview;
+
+    try bridge.steam.adapter.previewAchievementUnlock(&session, allocator, io, achievement.api_name, duration_ms);
+    std.debug.print(
+        "[SteamNotificationPreview] appid={d} achievement={s} name={s} native_unlock_toast=true temporary_unlock_stored=true rollback_stored=true state_after=locked requested_duration_ms={d}\n",
+        .{
+            app_id,
+            achievement.api_name,
+            achievement.name,
+            duration_ms,
+        },
+    );
+}
+
 fn numericSuffix(api_name: []const u8) ?[]const u8 {
     var start = api_name.len;
     while (start > 0 and std.ascii.isDigit(api_name[start - 1])) start -= 1;
@@ -1024,6 +1037,29 @@ test "parse experimental Steam notification opt-in" {
     defer cli.schema_paths.deinit(allocator);
     try std.testing.expectEqual(Command.steam_local_sync, cli.command);
     try std.testing.expect(cli.experimental_steam_notification);
+}
+
+test "parse temporary Steam unlock preview" {
+    const allocator = std.testing.allocator;
+    var cli = try parseArgs(allocator, &.{
+        "achievement-bridge",
+        "notify-test",
+        "--appid",
+        "2638890",
+        "--achievement",
+        "ACHIEVEMENT_050",
+        "--confirm-steam-write",
+        "--duration-ms",
+        "9000",
+    });
+    defer cli.roots.deinit(allocator);
+    defer cli.schema_paths.deinit(allocator);
+    try std.testing.expectEqual(Command.notify_test, cli.command);
+    try std.testing.expectEqual(@as(u32, 2638890), cli.app_id.?);
+    try std.testing.expectEqualStrings("ACHIEVEMENT_050", cli.achievement_id.?);
+    try std.testing.expectEqual(@as(u32, 9000), cli.duration_ms);
+    try std.testing.expect(cli.confirm_steam_write);
+    try std.testing.expect(!cli.confirm_local_write);
 }
 
 test "parse RUNE watcher command" {

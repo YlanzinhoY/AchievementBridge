@@ -35,6 +35,9 @@ except ImportError:  # pragma: no cover - the packaged application is Windows-on
 SUPPORTED_SYNC_PROVIDERS = ("gse", "rune")
 MONITORED_PROVIDERS = ("ubisoft", "uplay_r2")
 PROVIDER_PRIORITY = ("gse", "rune", "uplay_r2", "ubisoft", "steam", "epic", "gog", "ea", "xbox")
+DEFAULT_NOTIFICATION_PREVIEW_MS = 7000
+MIN_NOTIFICATION_PREVIEW_MS = 1000
+MAX_NOTIFICATION_PREVIEW_MS = 60_000
 console = Console(highlight=False)
 ResultType = TypeVar("ResultType")
 
@@ -298,7 +301,7 @@ def ensure_steam_host(bridge: Path, steam_root: str | None = None) -> SteamHostS
     return SteamHostSetup(True, changed, changed and process_is_running("steam.exe"), target, "integração Steam pronta")
 
 
-def run_bridge(bridge: Path, arguments: Iterable[str], timeout: int = 30) -> subprocess.CompletedProcess[str]:
+def run_bridge(bridge: Path, arguments: Iterable[str], timeout: int | None = 30) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(bridge), *arguments],
         cwd=bridge.parent,
@@ -310,6 +313,69 @@ def run_bridge(bridge: Path, arguments: Iterable[str], timeout: int = 30) -> sub
         timeout=timeout,
         check=False,
     )
+
+
+def notification_preview_arguments(
+    app_id: int,
+    achievement: str,
+    steam_root: str | None,
+    duration_ms: int = DEFAULT_NOTIFICATION_PREVIEW_MS,
+    wait_for_game_dir: str | None = None,
+) -> list[str]:
+    """Build an explicitly confirmed temporary unlock/rollback request."""
+    api_name = achievement.strip()
+    if app_id <= 0:
+        raise RuntimeError("o AppID precisa ser maior que zero")
+    if not api_name:
+        raise RuntimeError("informe o API name da conquista")
+    if not MIN_NOTIFICATION_PREVIEW_MS <= duration_ms <= MAX_NOTIFICATION_PREVIEW_MS:
+        raise RuntimeError(
+            f"a duração deve ficar entre {MIN_NOTIFICATION_PREVIEW_MS} e {MAX_NOTIFICATION_PREVIEW_MS} ms"
+        )
+    if wait_for_game_dir is not None and not wait_for_game_dir.strip():
+        raise RuntimeError("informe a pasta do jogo ao usar --wait-for-game")
+
+    arguments = [
+        "notify-test",
+        "--appid",
+        str(app_id),
+        "--achievement",
+        api_name,
+        "--confirm-steam-write",
+        "--duration-ms",
+        str(duration_ms),
+    ]
+    if steam_root:
+        arguments += ["--steam-root", steam_root]
+    if wait_for_game_dir:
+        arguments += ["--wait-for-game", "--game-dir", wait_for_game_dir]
+    return arguments
+
+
+def request_notification_preview(
+    bridge: Path,
+    app_id: int,
+    achievement: str,
+    steam_root: str | None,
+    duration_ms: int = DEFAULT_NOTIFICATION_PREVIEW_MS,
+    wait_for_game_dir: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    arguments = notification_preview_arguments(
+        app_id,
+        achievement,
+        steam_root,
+        duration_ms,
+        wait_for_game_dir,
+    )
+    # Both StoreStats phases can be delayed by Steam's rate limiter. The Zig
+    # transaction remains responsible for restoring the locked state.
+    timeout = None if wait_for_game_dir is not None else max(300, duration_ms // 1000 + 270)
+    result = run_bridge(bridge, arguments, timeout=timeout)
+    if result.returncode != 0:
+        raise RuntimeError(result.stdout.strip() or "não foi possível simular o popup da Steam")
+    if "[SteamNotificationPreview]" not in result.stdout:
+        raise RuntimeError("a Steam não confirmou a solicitação da prévia")
+    return result
 
 
 def parse_installed_games(output: str) -> list[InstalledGame]:
@@ -572,6 +638,8 @@ def show_available_achievements(args: CliOptions, bridge: Path) -> None:
         "[bold]Escolha um jogo[/]",
         choices=tuple(str(index) for index in range(0, len(eligible) + 1)),
         default="0",
+        show_choices=False,
+        show_default=False,
     )
     if selected == "0":
         return
@@ -589,6 +657,115 @@ def show_available_achievements(args: CliOptions, bridge: Path) -> None:
     console.input("\nPressione Enter para voltar...")
 
 
+def simulate_popup(args: CliOptions, bridge: Path) -> None:
+    reports = inspect_installed_games(bridge, args.steam_root, verify_schema=False)
+    eligible = [
+        report for report in reports
+        if report.status in {"COMPLETO", "NATIVO", "SÓ DETECTA"}
+    ]
+    if not eligible:
+        console.print(Panel("Nenhum jogo compatível foi encontrado.", border_style="yellow"))
+        console.input("\nPressione Enter para voltar...")
+        return
+
+    game_notice: tuple[str, str, str] | None = None
+    while True:
+        clear_screen()
+        print_banner()
+        console.print("\n[dim]Escolha um jogo para simular popups nativos da Steam...[/]\n")
+        if game_notice is not None:
+            message, title, style = game_notice
+            console.print(Panel(message, title=title, border_style=style))
+            game_notice = None
+
+        choices = Table(box=box.SIMPLE, header_style="bold cyan")
+        choices.add_column("Opção", justify="right", style="bright_cyan")
+        choices.add_column("Jogo")
+        choices.add_column("Status")
+        choices.add_column("AppID", style="dim")
+        for index, report in enumerate(eligible, start=1):
+            choices.add_row(str(index), report.game.name, report.status, str(report.game.app_id))
+        choices.add_row("0", "Voltar ao menu", "", "")
+        console.print(choices)
+        selected = Prompt.ask(
+            "[bold]Escolha um jogo[/]",
+            choices=tuple(str(index) for index in range(0, len(eligible) + 1)),
+            default="0",
+            show_choices=False,
+            show_default=False,
+        )
+        if selected == "0":
+            return
+
+        game = eligible[int(selected) - 1].game
+        achievement_notice: tuple[str, str, str] | None = None
+        while True:
+            clear_screen()
+            print_banner()
+            console.print(f"\n[bold]{game.name}[/] — escolha uma conquista para testar.\n")
+            if achievement_notice is not None:
+                message, title, style = achievement_notice
+                console.print(Panel(message, title=title, border_style=style))
+                achievement_notice = None
+
+            try:
+                achievements = [
+                    achievement
+                    for achievement in read_available_achievements(bridge, game.app_id, args.steam_root)
+                    if not achievement.unlocked
+                ]
+            except RuntimeError as error:
+                game_notice = (str(error), "[bold red]Catálogo indisponível[/]", "red")
+                break
+            if not achievements:
+                game_notice = (
+                    "Todas as conquistas desse jogo já estão desbloqueadas; "
+                    "não há estado seguro para restaurar.",
+                    "[bold yellow]Nenhuma conquista disponível[/]",
+                    "yellow",
+                )
+                break
+
+            achievement_choices = Table(box=box.SIMPLE, header_style="bold cyan")
+            achievement_choices.add_column("Opção", justify="right", style="bright_cyan")
+            achievement_choices.add_column("Conquista")
+            achievement_choices.add_column("API name", style="dim")
+            for index, achievement in enumerate(achievements, start=1):
+                achievement_choices.add_row(str(index), achievement.name, achievement.api_name)
+            achievement_choices.add_row("0", "Trocar de jogo", "")
+            console.print(achievement_choices)
+            selected_achievement = Prompt.ask(
+                "[bold]Escolha uma conquista[/]",
+                choices=tuple(str(index) for index in range(0, len(achievements) + 1)),
+                default="0",
+                show_choices=False,
+                show_default=False,
+            )
+            if selected_achievement == "0":
+                break
+
+            achievement = achievements[int(selected_achievement) - 1]
+            try:
+                with console.status(
+                    "[cyan]Solicitando o toast nativo e aguardando a Steam confirmar o rollback...[/]",
+                    spinner="dots",
+                ):
+                    request_notification_preview(bridge, game.app_id, achievement.api_name, args.steam_root)
+            except RuntimeError as error:
+                achievement_notice = (
+                    str(error),
+                    "[bold red]Simulação não concluída[/]",
+                    "red",
+                )
+            else:
+                achievement_notice = (
+                    f"Toast nativo exibido para [bold]{achievement.name}[/].\n"
+                    "O rollback foi confirmado; escolha outra conquista para continuar testando.",
+                    "[bold green]Simulação concluída[/]",
+                    "green",
+                )
+
+
 def interactive_menu(args: CliOptions, bridge: Path) -> int:
     while True:
         clear_screen()
@@ -601,17 +778,20 @@ def interactive_menu(args: CliOptions, bridge: Path) -> int:
         actions = Table.grid(padding=(0, 2))
         actions.add_column(style="bold bright_cyan", justify="right")
         actions.add_column()
-        actions.add_row("[1]", "Ativar Bridge e acompanhar logs")
-        actions.add_row("[2]", "Ver jogos compatíveis")
-        actions.add_row("[3]", "Ver conquistas disponíveis")
-        actions.add_row("[4]", "Atualizar status")
-        actions.add_row("[0]", "Sair")
+        actions.add_row("1", "Ativar Bridge e acompanhar logs")
+        actions.add_row("2", "Ver jogos compatíveis")
+        actions.add_row("3", "Ver conquistas disponíveis")
+        actions.add_row("4", "Simular popup da Steam")
+        actions.add_row("5", "Atualizar status")
+        actions.add_row("0", "Sair")
         console.print(Panel(actions, title="[bold]O que você quer fazer?[/]", border_style="cyan"))
         try:
             choice = Prompt.ask(
                 "[bold]Escolha uma opção[/]",
-                choices=("1", "2", "3", "4", "0"),
+                choices=("1", "2", "3", "4", "5", "0"),
                 default="1",
+                show_choices=False,
+                show_default=False,
             )
         except (EOFError, KeyboardInterrupt):
             return 0
@@ -637,6 +817,8 @@ def interactive_menu(args: CliOptions, bridge: Path) -> int:
         elif choice == "3":
             show_available_achievements(args, bridge)
         elif choice == "4":
+            exit_on_failure(lambda: simulate_popup(args, bridge))
+        elif choice == "5":
             continue
         elif choice == "0":
             return 0
@@ -878,6 +1060,48 @@ def achievements_command(
     )
     achievements = exit_on_failure(lambda: read_available_achievements(bridge, app_id, options.steam_root))
     print_achievement_table(game, achievements)
+
+
+@app.command("simulate-popup")
+def simulate_popup_command(
+    context: typer.Context,
+    app_id: Annotated[int, typer.Argument(help="Steam AppID do jogo")],
+    achievement: Annotated[str, typer.Argument(help="Nome API da conquista")],
+    duration_ms: Annotated[
+        int,
+        typer.Option(
+            min=MIN_NOTIFICATION_PREVIEW_MS,
+            max=MAX_NOTIFICATION_PREVIEW_MS,
+            help="Tempo antes do rollback, em milissegundos",
+        ),
+    ] = DEFAULT_NOTIFICATION_PREVIEW_MS,
+    wait_for_game: Annotated[
+        bool,
+        typer.Option("--wait-for-game", help="Aguardar o jogo abrir antes de solicitar o popup"),
+    ] = False,
+    game_dir: Annotated[
+        str | None,
+        typer.Option(help="Pasta do jogo usada por --wait-for-game"),
+    ] = None,
+) -> None:
+    """Exiba o toast real com desbloqueio temporário e rollback."""
+    options = get_cli_options(context)
+    bridge = resolve_bridge(options.bridge)
+    wait_for_game_dir = (game_dir or "") if wait_for_game else None
+    exit_on_failure(lambda: request_notification_preview(
+        bridge,
+        app_id,
+        achievement,
+        options.steam_root,
+        duration_ms,
+        wait_for_game_dir,
+    ))
+    console.print(Panel(
+        f"Toast nativo solicitado para [bold]{achievement}[/] (AppID {app_id}).\n"
+        "O desbloqueio temporário foi revertido e a conquista voltou a ficar bloqueada.",
+        title="[bold green]Simulação concluída[/]",
+        border_style="green",
+    ))
 
 
 @app.command("start")
