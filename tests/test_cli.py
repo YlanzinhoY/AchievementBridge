@@ -1,5 +1,8 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import achievement_bridge_cli as cli
 
 from typer.testing import CliRunner
 
@@ -18,6 +21,12 @@ from achievement_bridge_cli import (
 
 
 class CliParsingTests(unittest.TestCase):
+    def test_velopack_hooks_are_skipped_when_running_from_source(self) -> None:
+        with patch.object(cli.velopack, "App") as app:
+            cli.initialize_velopack()
+
+        app.assert_not_called()
+
     def test_typer_help_lists_public_commands(self) -> None:
         result = CliRunner().invoke(app, ["--help"])
 
