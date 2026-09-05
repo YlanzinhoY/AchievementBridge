@@ -30,8 +30,8 @@ zig build -Doptimize=ReleaseSafe
 
 A abertura padrão mostra um menu com o estado da Steam e do Bridge. Escolha `1` para ativar o
 monitor e acompanhar os eventos ao vivo, `2` para consultar a compatibilidade dos jogos instalados,
-`3` para escolher um jogo e ver suas conquistas disponíveis ou `0` para sair. Nada começa a monitorar
-até o usuário escolher **Ativar Bridge**.
+`3` para escolher um jogo e ver suas conquistas disponíveis, `4` para simular um popup nativo da
+Steam ou `0` para sair. Nada começa a monitorar até o usuário escolher **Ativar Bridge**.
 
 O log também fica em `%LOCALAPPDATA%\AchievementBridge\bridge-cli.log`. `Ctrl+C` encerra o monitor
 e volta ao menu. A CLI recusa iniciar uma segunda instância por padrão; feche o LuaTools antes de
@@ -63,6 +63,21 @@ O catálogo de um jogo também pode ser consultado diretamente pelo AppID:
 
 ```powershell
 .\bridge-cli.cmd achievements 2638890
+```
+
+Uma prévia visual pode ser solicitada pelo menu ou diretamente pelo API name:
+
+```powershell
+.\bridge-cli.cmd simulate-popup 2638890 ACHIEVEMENT_050
+```
+
+O simulador usa somente `IndicateAchievementProgress(API_NAME, 1, 2)`. Ele não chama
+`SetAchievement`, `StoreStats`, o sync local nem altera saves. O núcleo relê o estado antes e depois
+da solicitação e só confirma a prévia quando ele permanece igual. Nome, imagem e localização são os
+do catálogo Steam. Para aguardar o jogo abrir antes da prévia:
+
+```powershell
+.\bridge-cli.cmd simulate-popup 2638890 ACHIEVEMENT_050 --wait-for-game --game-dir "D:\SteamLibrary\steamapps\common\OnimushaWotS"
 ```
 
 Quando uma conquista GSE/RUNE é emitida, a CLI relê o arquivo do provider e comprova que o mesmo
@@ -284,7 +299,7 @@ Quando houver uma versão Steam equivalente, `--appid` habilita o mapper exato p
 zig build run -- uplay-r2-watch --appid 3751950
 ```
 
-É possível conferir o popup sem alterar o estado da Steam nem do save:
+É possível conferir o popup nativo de progresso sem alterar o estado da Steam nem do save:
 
 ```powershell
 zig build run -- notify-test --appid 3751950 --achievement ACObsidian_Ach_10
