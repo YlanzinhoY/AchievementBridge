@@ -16,6 +16,7 @@ from achievement_bridge_cli import (
     configure_opensteamtool,
     ensure_steam_host,
     menu_start_options,
+    notification_preview_arguments,
     parse_achievement_count,
     parse_available_achievements,
     parse_installed_games,
@@ -36,6 +37,7 @@ class CliParsingTests(unittest.TestCase):
         self.assertEqual(0, result.exit_code)
         self.assertIn("achievements", result.stdout)
         self.assertIn("games", result.stdout)
+        self.assertIn("simulate-popup", result.stdout)
         self.assertIn("start", result.stdout)
         self.assertIn("setup", result.stdout)
 
@@ -158,6 +160,28 @@ Provider candidates:
         self.assertTrue(monitor_args.no_notifications)
         self.assertTrue(monitor_args.native_toast)
         self.assertFalse(monitor_args.allow_duplicate)
+
+    def test_notification_preview_never_requests_a_write(self) -> None:
+        arguments = notification_preview_arguments(
+            2638890,
+            " ACHIEVEMENT_050 ",
+            "C:\\steam",
+            duration_ms=9000,
+            wait_for_game_dir="D:\\SteamLibrary\\steamapps\\common\\OnimushaWotS",
+        )
+
+        self.assertEqual("notify-test", arguments[0])
+        self.assertIn("ACHIEVEMENT_050", arguments)
+        self.assertIn("--duration-ms", arguments)
+        self.assertIn("--wait-for-game", arguments)
+        self.assertNotIn("steam-unlock", arguments)
+        self.assertNotIn("steam-local-sync", arguments)
+        self.assertNotIn("--confirm-steam-write", arguments)
+        self.assertNotIn("--confirm-local-write", arguments)
+
+    def test_notification_preview_requires_game_dir_when_waiting(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "pasta do jogo"):
+            notification_preview_arguments(2638890, "ACHIEVEMENT_050", None, wait_for_game_dir="")
 
 
 if __name__ == "__main__":
