@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import achievement_bridge_cli as cli
@@ -12,6 +13,8 @@ from achievement_bridge_cli import (
     app,
     best_provider,
     classify_support,
+    configure_opensteamtool,
+    ensure_steam_host,
     menu_start_options,
     parse_achievement_count,
     parse_available_achievements,
@@ -34,6 +37,46 @@ class CliParsingTests(unittest.TestCase):
         self.assertIn("achievements", result.stdout)
         self.assertIn("games", result.stdout)
         self.assertIn("start", result.stdout)
+        self.assertIn("setup", result.stdout)
+
+    def test_configures_cloud_table_without_touching_other_tables(self) -> None:
+        configured = configure_opensteamtool(
+            '[lua]\npaths = ["config/stplug-in"]\n\n[cloud]\nenabled = false\n'
+            'library = "cloud_redirect.dll"\n\n[remote]\nprovider = "github"\n',
+            "AchievementBridge/achievement-bridge-cloud-abc123.dll",
+        )
+
+        self.assertIn("enabled = true", configured)
+        self.assertIn('library = "AchievementBridge/achievement-bridge-cloud-abc123.dll"', configured)
+        self.assertIn('provider = "github"', configured)
+        self.assertEqual(1, configured.count("library ="))
+
+    def test_installs_versioned_cloud_host_idempotently(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = root / "app"
+            steam = root / "steam"
+            app.mkdir()
+            steam.mkdir()
+            bridge = app / "achievement-bridge.exe"
+            bridge.write_bytes(b"core")
+            (app / "achievement-bridge-cloud.dll").write_bytes(b"cloud-v1")
+            config = steam / "opensteamtool.toml"
+            config.write_text("[lua]\npaths = []\n", encoding="utf-8")
+
+            with patch.object(cli, "process_is_running", return_value=True):
+                first = ensure_steam_host(bridge, str(steam))
+                second = ensure_steam_host(bridge, str(steam))
+
+            self.assertTrue(first.installed)
+            self.assertTrue(first.changed)
+            self.assertTrue(first.restart_required)
+            self.assertIsNotNone(first.library)
+            assert first.library is not None
+            self.assertTrue(first.library.is_file())
+            self.assertIn(first.library.name, config.read_text(encoding="utf-8"))
+            self.assertFalse(second.changed)
+            self.assertFalse(second.restart_required)
 
     def test_parses_installed_game_with_spaces(self) -> None:
         games = parse_installed_games(

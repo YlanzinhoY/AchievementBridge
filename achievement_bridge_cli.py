@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -23,6 +25,11 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
+
+try:
+    import winreg
+except ImportError:  # pragma: no cover - the packaged application is Windows-only
+    winreg = None  # type: ignore[assignment]
 
 
 SUPPORTED_SYNC_PROVIDERS = ("gse", "rune")
@@ -85,6 +92,15 @@ class MonitorOptions:
     no_notifications: bool
     native_toast: bool
     allow_duplicate: bool
+
+
+@dataclass(frozen=True)
+class SteamHostSetup:
+    installed: bool
+    changed: bool
+    restart_required: bool
+    library: Path | None
+    message: str
 
 
 class EventParser:
@@ -179,6 +195,107 @@ def initialize_velopack() -> None:
     """Handle Velopack lifecycle hooks only inside an installed release."""
     if getattr(sys, "frozen", False) and (application_root() / "sq.version").is_file():
         velopack.App().run()
+
+
+def find_steam_root(explicit: str | None = None) -> Path | None:
+    """Resolve the Steam installation without starting the Zig host."""
+    if explicit:
+        root = Path(explicit).expanduser()
+        return root.resolve() if root.is_dir() else None
+    configured = os.environ.get("STEAM_ROOT")
+    if configured:
+        root = Path(configured).expanduser()
+        if root.is_dir():
+            return root.resolve()
+    if winreg is None:
+        return None
+    for hive, key_name, value_name in (
+        (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+    ):
+        try:
+            with winreg.OpenKey(hive, key_name) as key:
+                value, _ = winreg.QueryValueEx(key, value_name)
+            root = Path(os.path.expandvars(str(value)))
+            if root.is_dir():
+                return root.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def configure_opensteamtool(source: str, library: str) -> str:
+    """Enable the cloud host while preserving unrelated TOML tables and comments."""
+    newline = "\r\n" if "\r\n" in source else "\n"
+    trailing_newline = source.endswith(("\n", "\r"))
+    lines = source.splitlines()
+    header = next((index for index, line in enumerate(lines)
+                   if re.match(r"^\s*\[\s*cloud\s*\]", line) and not line.lstrip().startswith("#")), -1)
+    if header < 0:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend(("[cloud]", "enabled = true", f'library = "{library}"'))
+    else:
+        section_end = next((index for index in range(header + 1, len(lines))
+                            if re.match(r"^\s*\[[^[]+\]", lines[index])
+                            and not lines[index].lstrip().startswith("#")), len(lines))
+        for key, value in (("enabled", "true"), ("library", f'"{library}"')):
+            found = False
+            for index in range(header + 1, section_end):
+                stripped = lines[index].lstrip()
+                if stripped.startswith("#") or not re.match(rf"^{re.escape(key)}\s*=", stripped):
+                    continue
+                indent = lines[index][:_leading_whitespace_length(lines[index])]
+                lines[index] = f"{indent}{key} = {value}"
+                found = True
+                break
+            if not found:
+                lines.insert(section_end, f"{key} = {value}")
+                section_end += 1
+    rendered = newline.join(lines)
+    return rendered + newline if trailing_newline else rendered
+
+
+def _leading_whitespace_length(value: str) -> int:
+    return len(value) - len(value.lstrip())
+
+
+def ensure_steam_host(bridge: Path, steam_root: str | None = None) -> SteamHostSetup:
+    """Install a versioned cloud host and point OpenSteamTool at it safely."""
+    root = find_steam_root(steam_root)
+    if root is None:
+        return SteamHostSetup(False, False, False, None, "pasta da Steam não encontrada")
+    source = bridge.parent / "achievement-bridge-cloud.dll"
+    if not source.is_file():
+        return SteamHostSetup(False, False, False, None, "achievement-bridge-cloud.dll não encontrada")
+    config = root / "opensteamtool.toml"
+    if not config.is_file():
+        return SteamHostSetup(False, False, False, None, "opensteamtool.toml não encontrado")
+
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()[:12]
+    target_dir = root / "AchievementBridge"
+    target = target_dir / f"achievement-bridge-cloud-{digest}.dll"
+    changed = False
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if not target.is_file() or target.read_bytes() != source.read_bytes():
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        shutil.copyfile(source, temporary)
+        temporary.replace(target)
+        changed = True
+
+    relative = f"AchievementBridge/{target.name}"
+    current = config.read_text(encoding="utf-8-sig")
+    configured = configure_opensteamtool(current, relative)
+    if configured != current:
+        backup = config.with_name(config.name + ".achievement-bridge.bak")
+        if not backup.exists():
+            shutil.copyfile(config, backup)
+        temporary = config.with_suffix(config.suffix + ".tmp")
+        temporary.write_text(configured, encoding="utf-8", newline="")
+        temporary.replace(config)
+        changed = True
+
+    return SteamHostSetup(True, changed, changed and process_is_running("steam.exe"), target, "integração Steam pronta")
 
 
 def run_bridge(bridge: Path, arguments: Iterable[str], timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -569,6 +686,15 @@ def start_monitor(args: MonitorOptions, bridge: Path) -> int:
 
     log_path = None if args.no_file_log else Path(args.log or default_log_path())
     log = LogSink(log_path)
+    try:
+        setup = ensure_steam_host(bridge, args.steam_root)
+        if setup.installed:
+            suffix = "; reinicie a Steam para carregar esta versão" if setup.restart_required else ""
+            log.write(f"STEAM HOST OK library={setup.library}{suffix}")
+        else:
+            log.write(f"STEAM HOST AVISO {setup.message}")
+    except OSError as error:
+        log.write(f"STEAM HOST AVISO configuração não atualizada: {error}")
     if not args.no_scan:
         reports = inspect_installed_games(bridge, args.steam_root, verify_schema=True)
         print_game_table(reports)
@@ -691,6 +817,21 @@ def status_command(context: typer.Context) -> None:
     """Mostre o estado atual da Steam e do Bridge."""
     options = get_cli_options(context)
     exit_on_failure(lambda: print_status(resolve_bridge(options.bridge)))
+
+
+@app.command("setup")
+def setup_command(context: typer.Context) -> None:
+    """Prepare a integração da Steam usada por cache, overlay e toast nativo."""
+    options = get_cli_options(context)
+    bridge = resolve_bridge(options.bridge)
+    result = exit_on_failure(lambda: ensure_steam_host(bridge, options.steam_root))
+    style = "green" if result.installed else "yellow"
+    details = result.message
+    if result.library is not None:
+        details += f"\nBiblioteca: {result.library}"
+    if result.restart_required:
+        details += "\nReinicie a Steam para carregar esta versão."
+    console.print(Panel(details, title="[bold]Integração Steam[/]", border_style=style))
 
 
 @app.command("games")
