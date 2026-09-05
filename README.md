@@ -84,6 +84,9 @@ faz até três tentativas controladas. Se o processo falhar depois do `SetAchiev
 tenta o rollback no bloco de limpeza.
 Durante os poucos segundos da prévia, o desbloqueio é enviado à Steam de verdade; portanto esse modo
 deve ser usado apenas para testes conscientes. O simulador não altera saves nem usa popup do Windows.
+No menu interativo, depois de cada rollback confirmado a CLI atualiza o catálogo e volta diretamente
+à lista de conquistas do mesmo jogo. É possível repetir o teste ou escolher `Trocar de jogo` sem
+retornar ao menu principal.
 Para opcionalmente aguardar um jogo abrir antes da transação:
 
 ```powershell
