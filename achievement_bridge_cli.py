@@ -658,9 +658,6 @@ def show_available_achievements(args: CliOptions, bridge: Path) -> None:
 
 
 def simulate_popup(args: CliOptions, bridge: Path) -> None:
-    clear_screen()
-    print_banner()
-    console.print("\n[dim]Escolha o jogo e a conquista para simular o popup da Steam...[/]\n")
     reports = inspect_installed_games(bridge, args.steam_root, verify_schema=False)
     eligible = [
         report for report in reports
@@ -671,69 +668,102 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
         console.input("\nPressione Enter para voltar...")
         return
 
-    choices = Table(box=box.SIMPLE, header_style="bold cyan")
-    choices.add_column("Opção", justify="right", style="bright_cyan")
-    choices.add_column("Jogo")
-    choices.add_column("Status")
-    choices.add_column("AppID", style="dim")
-    for index, report in enumerate(eligible, start=1):
-        choices.add_row(str(index), report.game.name, report.status, str(report.game.app_id))
-    choices.add_row("0", "Voltar", "", "")
-    console.print(choices)
-    selected = Prompt.ask(
-        "[bold]Escolha um jogo[/]",
-        choices=tuple(str(index) for index in range(0, len(eligible) + 1)),
-        default="0",
-        show_choices=False,
-        show_default=False,
-    )
-    if selected == "0":
-        return
+    game_notice: tuple[str, str, str] | None = None
+    while True:
+        clear_screen()
+        print_banner()
+        console.print("\n[dim]Escolha um jogo para simular popups nativos da Steam...[/]\n")
+        if game_notice is not None:
+            message, title, style = game_notice
+            console.print(Panel(message, title=title, border_style=style))
+            game_notice = None
 
-    game = eligible[int(selected) - 1].game
-    achievements = [
-        achievement
-        for achievement in read_available_achievements(bridge, game.app_id, args.steam_root)
-        if not achievement.unlocked
-    ]
-    if not achievements:
-        console.print(Panel(
-            "Todas as conquistas desse jogo já estão desbloqueadas; não há estado seguro para restaurar.",
-            border_style="yellow",
-        ))
-        console.input("\nPressione Enter para voltar...")
-        return
-    achievement_choices = Table(box=box.SIMPLE, header_style="bold cyan")
-    achievement_choices.add_column("Opção", justify="right", style="bright_cyan")
-    achievement_choices.add_column("Conquista")
-    achievement_choices.add_column("API name", style="dim")
-    for index, achievement in enumerate(achievements, start=1):
-        achievement_choices.add_row(str(index), achievement.name, achievement.api_name)
-    achievement_choices.add_row("0", "Voltar", "")
-    console.print(achievement_choices)
-    selected_achievement = Prompt.ask(
-        "[bold]Escolha uma conquista[/]",
-        choices=tuple(str(index) for index in range(0, len(achievements) + 1)),
-        default="0",
-        show_choices=False,
-        show_default=False,
-    )
-    if selected_achievement == "0":
-        return
+        choices = Table(box=box.SIMPLE, header_style="bold cyan")
+        choices.add_column("Opção", justify="right", style="bright_cyan")
+        choices.add_column("Jogo")
+        choices.add_column("Status")
+        choices.add_column("AppID", style="dim")
+        for index, report in enumerate(eligible, start=1):
+            choices.add_row(str(index), report.game.name, report.status, str(report.game.app_id))
+        choices.add_row("0", "Voltar ao menu", "", "")
+        console.print(choices)
+        selected = Prompt.ask(
+            "[bold]Escolha um jogo[/]",
+            choices=tuple(str(index) for index in range(0, len(eligible) + 1)),
+            default="0",
+            show_choices=False,
+            show_default=False,
+        )
+        if selected == "0":
+            return
 
-    achievement = achievements[int(selected_achievement) - 1]
-    with console.status(
-        "[cyan]Solicitando o toast nativo e aguardando a Steam confirmar o rollback...[/]",
-        spinner="dots",
-    ):
-        request_notification_preview(bridge, game.app_id, achievement.api_name, args.steam_root)
-    console.print(Panel(
-        f"Toast nativo solicitado para [bold]{achievement.name}[/] ({game.name}).\n"
-        "O desbloqueio temporário foi revertido e a conquista voltou a ficar bloqueada.",
-        title="[bold green]Simulação concluída[/]",
-        border_style="green",
-    ))
-    console.input("\nPressione Enter para voltar...")
+        game = eligible[int(selected) - 1].game
+        achievement_notice: tuple[str, str, str] | None = None
+        while True:
+            clear_screen()
+            print_banner()
+            console.print(f"\n[bold]{game.name}[/] — escolha uma conquista para testar.\n")
+            if achievement_notice is not None:
+                message, title, style = achievement_notice
+                console.print(Panel(message, title=title, border_style=style))
+                achievement_notice = None
+
+            try:
+                achievements = [
+                    achievement
+                    for achievement in read_available_achievements(bridge, game.app_id, args.steam_root)
+                    if not achievement.unlocked
+                ]
+            except RuntimeError as error:
+                game_notice = (str(error), "[bold red]Catálogo indisponível[/]", "red")
+                break
+            if not achievements:
+                game_notice = (
+                    "Todas as conquistas desse jogo já estão desbloqueadas; "
+                    "não há estado seguro para restaurar.",
+                    "[bold yellow]Nenhuma conquista disponível[/]",
+                    "yellow",
+                )
+                break
+
+            achievement_choices = Table(box=box.SIMPLE, header_style="bold cyan")
+            achievement_choices.add_column("Opção", justify="right", style="bright_cyan")
+            achievement_choices.add_column("Conquista")
+            achievement_choices.add_column("API name", style="dim")
+            for index, achievement in enumerate(achievements, start=1):
+                achievement_choices.add_row(str(index), achievement.name, achievement.api_name)
+            achievement_choices.add_row("0", "Trocar de jogo", "")
+            console.print(achievement_choices)
+            selected_achievement = Prompt.ask(
+                "[bold]Escolha uma conquista[/]",
+                choices=tuple(str(index) for index in range(0, len(achievements) + 1)),
+                default="0",
+                show_choices=False,
+                show_default=False,
+            )
+            if selected_achievement == "0":
+                break
+
+            achievement = achievements[int(selected_achievement) - 1]
+            try:
+                with console.status(
+                    "[cyan]Solicitando o toast nativo e aguardando a Steam confirmar o rollback...[/]",
+                    spinner="dots",
+                ):
+                    request_notification_preview(bridge, game.app_id, achievement.api_name, args.steam_root)
+            except RuntimeError as error:
+                achievement_notice = (
+                    str(error),
+                    "[bold red]Simulação não concluída[/]",
+                    "red",
+                )
+            else:
+                achievement_notice = (
+                    f"Toast nativo exibido para [bold]{achievement.name}[/].\n"
+                    "O rollback foi confirmado; escolha outra conquista para continuar testando.",
+                    "[bold green]Simulação concluída[/]",
+                    "green",
+                )
 
 
 def interactive_menu(args: CliOptions, bridge: Path) -> int:
