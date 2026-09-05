@@ -15,10 +15,11 @@ Os artefatos serão criados em `zig-out/bin/achievement-bridge.exe` e `zig-out/b
 
 ## CLI aberta
 
-`achievement_bridge_cli.py` é uma interface standalone, escrita somente com a biblioteca padrão do
-Python 3.10+. Ela inicia o host Zig, mantém os logs visíveis e persistentes, informa qual jogo está
-ativo, classifica a compatibilidade da biblioteca Steam e sincroniza eventos GSE/RUNE verificados.
-Ela não contém nem depende de código do LuaTools.
+`achievement_bridge_cli.py` é uma interface standalone em Python 3.10+, construída com Typer e Rich.
+Ela inicia o host Zig, mantém os logs visíveis e persistentes, informa qual jogo está ativo, classifica
+a compatibilidade da biblioteca Steam e sincroniza eventos GSE/RUNE verificados. Ela não contém nem
+depende de código do LuaTools. Na primeira abertura, `bridge-cli.cmd` cria uma `.venv` isolada e instala
+automaticamente a dependência declarada em `requirements-cli.txt`.
 
 No Windows, compile o núcleo e abra a CLI:
 
@@ -28,8 +29,9 @@ zig build -Doptimize=ReleaseSafe
 ```
 
 A abertura padrão mostra um menu com o estado da Steam e do Bridge. Escolha `1` para ativar o
-monitor e acompanhar os eventos ao vivo, `2` para consultar a compatibilidade dos jogos instalados
-ou `0` para sair. Nada começa a monitorar até o usuário escolher **Ativar Bridge**.
+monitor e acompanhar os eventos ao vivo, `2` para consultar a compatibilidade dos jogos instalados,
+`3` para escolher um jogo e ver suas conquistas disponíveis ou `0` para sair. Nada começa a monitorar
+até o usuário escolher **Ativar Bridge**.
 
 O log também fica em `%LOCALAPPDATA%\AchievementBridge\bridge-cli.log`. `Ctrl+C` encerra o monitor
 e volta ao menu. A CLI recusa iniciar uma segunda instância por padrão; feche o LuaTools antes de
@@ -52,10 +54,16 @@ Para listar os jogos instalados:
 
 Os estados exibidos são:
 
-- `PRONTO`: provedor GSE/RUNE detectado, monitoramento e sync Steam standalone disponíveis;
+- `COMPLETO`: o Bridge detecta o evento e sincroniza com a Steam;
 - `NATIVO`: Steamworks oficial, portanto o jogo não precisa do Bridge;
-- `MONITORA`: o evento é detectável, mas ainda exige o mapper do LuaTools para sync;
-- `NÃO SUPORTADO`: runtime sem provider de conquistas implementado.
+- `SÓ DETECTA`: o evento é detectável, mas a CLI ainda não sincroniza sozinha;
+- `SEM SUPORTE`: runtime sem provider de conquistas implementado.
+
+O catálogo de um jogo também pode ser consultado diretamente pelo AppID:
+
+```powershell
+.\bridge-cli.cmd achievements 2638890
+```
 
 Quando uma conquista GSE/RUNE é emitida, a CLI relê o arquivo do provider e comprova que o mesmo
 AppID/API name está desbloqueado antes de escrever na Steam. Primeiro tenta `SetAchievement` +
