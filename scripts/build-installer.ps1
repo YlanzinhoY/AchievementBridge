@@ -112,6 +112,6 @@ $setup = Get-ChildItem -LiteralPath $distRoot -Filter '*Setup.exe' -File |
     Sort-Object LastWriteTimeUtc -Descending |
     Select-Object -First 1
 if ($null -eq $setup) { throw "Installer was not created in: $distRoot" }
-$hash = Get-FileHash -Algorithm SHA256 -LiteralPath $setup
+$hash = Get-FileHash -Algorithm SHA256 -LiteralPath $setup.FullName
 Write-Host "Installer: $($setup.FullName)"
 Write-Host "SHA256:   $($hash.Hash)"
