@@ -73,6 +73,32 @@ pub const Client = struct {
         self.* = undefined;
     }
 
+    /// Removes callbacks which were already pending on this dedicated pipe.
+    /// StoreStats does not return a call handle, so beginning each transaction
+    /// with an empty callback queue prevents an older 1102 result from being
+    /// mistaken for the write that follows.
+    pub fn drainCallbacks(self: *Client) !usize {
+        const CallbackMessage = extern struct {
+            user: i32,
+            callback: i32,
+            param: ?*anyopaque,
+            param_size: i32,
+        };
+        const GetCallback = *const fn (i32, *CallbackMessage, *i32) callconv(.c) u8;
+        const FreeLastCallback = *const fn (i32) callconv(.c) void;
+        const get_callback = try self.library.lookup(GetCallback, "Steam_BGetCallback");
+        const free_last_callback = try self.library.lookup(FreeLastCallback, "Steam_FreeLastCallback");
+        var drained: usize = 0;
+        var message: CallbackMessage = undefined;
+        var failed_call: i32 = 0;
+        while (get_callback(self.pipe, &message, &failed_call) != 0) {
+            free_last_callback(self.pipe);
+            drained += 1;
+            if (drained >= 4096) return error.CallbackDrainLimitExceeded;
+        }
+        return drained;
+    }
+
     /// Waits for Steam to acknowledge StoreStats on this pipe. A successful
     /// StoreStats return only queues the upload; callback 1102 confirms the
     /// server-side result for the selected app.
@@ -87,26 +113,53 @@ pub const Client = struct {
             game_id: u64,
             result: i32,
         };
+        const UserAchievementStored = extern struct {
+            game_id: u64,
+            group_achievement: bool,
+            achievement_name: [128]u8,
+            current_progress: u32,
+            maximum_progress: u32,
+        };
         const GetCallback = *const fn (i32, *CallbackMessage, *i32) callconv(.c) u8;
         const FreeLastCallback = *const fn (i32) callconv(.c) void;
         const get_callback = try self.library.lookup(GetCallback, "Steam_BGetCallback");
         const free_last_callback = try self.library.lookup(FreeLastCallback, "Steam_FreeLastCallback");
         const started = std.Io.Clock.awake.now(io).nanoseconds;
         const timeout_ns: i128 = @as(i128, timeout_ms) * std.time.ns_per_ms;
+        var transient_result: ?i32 = null;
         while (std.Io.Clock.awake.now(io).nanoseconds - started < timeout_ns) {
             var message: CallbackMessage = undefined;
             var failed_call: i32 = 0;
             while (get_callback(self.pipe, &message, &failed_call) != 0) {
                 defer free_last_callback(self.pipe);
+                if (message.callback == 1103 and message.param_size >= @sizeOf(UserAchievementStored)) {
+                    const raw = message.param orelse continue;
+                    const stored: *align(1) const UserAchievementStored = @ptrCast(raw);
+                    if (@as(u32, @truncate(stored.game_id)) != app_id) continue;
+                    const name_end = std.mem.indexOfScalar(u8, &stored.achievement_name, 0) orelse stored.achievement_name.len;
+                    std.debug.print(
+                        "[SteamStore] appid={d} achievement={s} progress={d}/{d}\n",
+                        .{ app_id, stored.achievement_name[0..name_end], stored.current_progress, stored.maximum_progress },
+                    );
+                    continue;
+                }
                 if (message.callback != 1102 or message.param_size < @sizeOf(UserStatsStored)) continue;
                 const raw = message.param orelse continue;
                 const stored: *align(1) const UserStatsStored = @ptrCast(raw);
                 if (@as(u32, @truncate(stored.game_id)) != app_id) continue;
-                if (stored.result != 1) return error.StoreStatsRejected;
+                std.debug.print("[SteamStore] appid={d} result={d}\n", .{ app_id, stored.result });
+                if (stored.result != 1) {
+                    if (isTransientStoreResult(stored.result)) {
+                        transient_result = stored.result;
+                        continue;
+                    }
+                    return error.StoreStatsRejected;
+                }
                 return;
             }
             try std.Io.sleep(io, .fromMilliseconds(10), .awake);
         }
+        if (transient_result != null) return error.StoreStatsRateLimited;
         return error.StoreStatsCallbackTimeout;
     }
 
@@ -150,6 +203,26 @@ pub const Client = struct {
         return error.UserStatsCallbackTimeout;
     }
 };
+
+fn isTransientStoreResult(result: i32) bool {
+    // Busy, Timeout, ServiceUnavailable, Pending, and LimitExceeded. Steam may
+    // table the request and emit a later callback on the same pipe.
+    return switch (result) {
+        10, 16, 20, 22, 25 => true,
+        else => false,
+    };
+}
+
+test "Steam transient StoreStats results can be awaited" {
+    try std.testing.expect(isTransientStoreResult(10));
+    try std.testing.expect(isTransientStoreResult(16));
+    try std.testing.expect(isTransientStoreResult(20));
+    try std.testing.expect(isTransientStoreResult(22));
+    try std.testing.expect(isTransientStoreResult(25));
+    try std.testing.expect(!isTransientStoreResult(1));
+    try std.testing.expect(!isTransientStoreResult(2));
+    try std.testing.expect(!isTransientStoreResult(8));
+}
 
 const windows = std.os.windows;
 const api = struct {

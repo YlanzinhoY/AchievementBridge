@@ -438,6 +438,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (cli.command == .notify_test) {
+        if (!cli.confirm_steam_write) return error.TemporarySteamWriteConfirmationRequired;
         const app_id = cli.app_id orelse return error.MissingAppId;
         const wanted = cli.achievement_id orelse return error.MissingAchievement;
         if (cli.wait_for_game) {
@@ -791,7 +792,7 @@ fn printHelp() void {
         \\  achievement-bridge uplay-r2-arm-replay --appid R2_PRODUCT_ID --achievement ID --confirm-local-write
         \\  achievement-bridge uplay-r2-scan [--root SAVE_PATH]
         \\  achievement-bridge uplay-r2-watch [--root SAVE_PATH] [--appid STEAM_ID]
-        \\  achievement-bridge notify-test --appid ID --achievement API_NAME [--wait-for-game --game-dir PATH]
+        \\  achievement-bridge notify-test --appid ID --achievement API_NAME --confirm-steam-write
         \\
         \\Sem --root, observa automaticamente:
         \\  %APPDATA%\\GSE Saves
@@ -806,7 +807,7 @@ fn printHelp() void {
         \\  --catalog PATH     Catalogo ordenado para gerar achievements_schema.json
         \\  --achievement ID   API name ou sufixo numerico para a previa da notificacao
         \\  --timestamp UNIX   Momento original do unlock usado pela sincronizacao local automatica
-        \\  --duration-ms N    Tempo da previa na bandeja (1000-60000; padrao: 7000)
+        \\  --duration-ms N    Tempo antes do rollback da previa (1000-60000; padrao: 7000)
         \\  --wait-for-game    Aguardar um processo do diretorio do jogo antes da previa
         \\  --confirm-steam-write Confirmacao obrigatoria para alterar conquistas da conta Steam
         \\  --confirm-local-write Confirmacao obrigatoria para alterar estado local ou o store local
@@ -923,23 +924,18 @@ fn simulateSteamNotification(
     var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
     defer achievements.deinit();
     const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
-    const state_before = achievement.unlocked;
+    if (achievement.unlocked) return error.AchievementAlreadyUnlockedForPreview;
 
-    try bridge.steam.adapter.queueAchievementProgressNotification(&session, allocator, io, achievement.api_name);
-    const state_after = try bridge.steam.adapter.isAchievementUnlocked(&session, allocator, achievement.api_name);
-    if (state_before != state_after) return error.NotificationPreviewChangedAchievementState;
+    try bridge.steam.adapter.previewAchievementUnlock(&session, allocator, io, achievement.api_name, duration_ms);
     std.debug.print(
-        "[SteamNotificationPreview] appid={d} achievement={s} name={s} progress=1/2 state_before={s} state_after={s} set_achievement=false store_stats=false duration_ms={d}\n",
+        "[SteamNotificationPreview] appid={d} achievement={s} name={s} native_unlock_toast=true temporary_unlock_stored=true rollback_stored=true state_after=locked requested_duration_ms={d}\n",
         .{
             app_id,
             achievement.api_name,
             achievement.name,
-            if (state_before) "unlocked" else "locked",
-            if (state_after) "unlocked" else "locked",
             duration_ms,
         },
     );
-    try std.Io.sleep(io, .fromMilliseconds(duration_ms), .awake);
 }
 
 fn numericSuffix(api_name: []const u8) ?[]const u8 {
@@ -1043,7 +1039,7 @@ test "parse experimental Steam notification opt-in" {
     try std.testing.expect(cli.experimental_steam_notification);
 }
 
-test "parse read-only Steam notification preview" {
+test "parse temporary Steam unlock preview" {
     const allocator = std.testing.allocator;
     var cli = try parseArgs(allocator, &.{
         "achievement-bridge",
@@ -1052,6 +1048,7 @@ test "parse read-only Steam notification preview" {
         "2638890",
         "--achievement",
         "ACHIEVEMENT_050",
+        "--confirm-steam-write",
         "--duration-ms",
         "9000",
     });
@@ -1061,7 +1058,7 @@ test "parse read-only Steam notification preview" {
     try std.testing.expectEqual(@as(u32, 2638890), cli.app_id.?);
     try std.testing.expectEqualStrings("ACHIEVEMENT_050", cli.achievement_id.?);
     try std.testing.expectEqual(@as(u32, 9000), cli.duration_ms);
-    try std.testing.expect(!cli.confirm_steam_write);
+    try std.testing.expect(cli.confirm_steam_write);
     try std.testing.expect(!cli.confirm_local_write);
 }
 
