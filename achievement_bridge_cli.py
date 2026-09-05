@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Annotated, Callable, Iterable, TextIO, TypeVar
 
 import typer
+import velopack
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -153,7 +154,7 @@ def _optional_int(value: str | None) -> int | None:
 
 
 def find_bridge(explicit: str | None = None) -> Path:
-    root = Path(__file__).resolve().parent
+    root = application_root()
     candidates = (
         explicit,
         os.environ.get("ACHIEVEMENT_BRIDGE_PATH"),
@@ -165,6 +166,19 @@ def find_bridge(explicit: str | None = None) -> Path:
         if candidate and Path(candidate).is_file():
             return Path(candidate).resolve()
     raise FileNotFoundError("achievement-bridge.exe não encontrado; execute 'zig build -Doptimize=ReleaseSafe'")
+
+
+def application_root() -> Path:
+    """Return the install directory both from source and from a frozen executable."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def initialize_velopack() -> None:
+    """Handle Velopack lifecycle hooks only inside an installed release."""
+    if getattr(sys, "frozen", False) and (application_root() / "sq.version").is_file():
+        velopack.App().run()
 
 
 def run_bridge(bridge: Path, arguments: Iterable[str], timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -757,6 +771,9 @@ def start_command(
 
 
 if __name__ == "__main__":
+    # Must run before regular CLI startup so Velopack can handle install,
+    # update and uninstall lifecycle hooks.
+    initialize_velopack()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
