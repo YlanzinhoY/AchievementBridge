@@ -2,7 +2,7 @@
 
 Bridge de conquistas Windows-only em Zig 0.16.0. Ele detecta jogos e runtimes, acompanha conquistas locais de GSE/Goldberg, RUNE, Steam, Ubisoft Connect e Uplay R2-compatible, normaliza os eventos, mantém um journal resiliente e mostra notificações nativas do Windows.
 
-O acesso direto ao `ISteamUserStats` é somente leitura por padrão. As exceções de escrita são o comando manual `steam-unlock`, que exige `--confirm-steam-write`, e o sync RUNE verificado, que só prossegue após reler o save e comprovar `Achieved=1` para o mesmo AppID/API name. Separadamente, a integração LuaTools sincroniza cada evento real do provider com o cache local da Steam como fallback. Uma tentativa opt-in de toast do Steam Overlay está disponível como experimento e é descrita abaixo.
+O acesso direto ao `ISteamUserStats` é somente leitura por padrão. As exceções de escrita são o comando manual `steam-unlock`, que exige `--confirm-steam-write`, e os syncs GSE/RUNE verificados, que só prosseguem após reler o save e comprovar o desbloqueio para o mesmo AppID/API name. Separadamente, a integração LuaTools e a CLI standalone sincronizam cada evento real do provider com o cache local da Steam como fallback. Uma tentativa opt-in de toast do Steam Overlay está disponível como experimento e é descrita abaixo.
 
 ## Compilar
 
@@ -12,6 +12,85 @@ zig build test
 ```
 
 Os artefatos serão criados em `zig-out/bin/achievement-bridge.exe` e `zig-out/bin/achievement-bridge-cloud.dll`.
+
+## CLI aberta
+
+`achievement_bridge_cli.py` é uma interface standalone em Python 3.10+, construída com Typer e Rich.
+Ela inicia o host Zig, mantém os logs visíveis e persistentes, informa qual jogo está ativo, classifica
+a compatibilidade da biblioteca Steam e sincroniza eventos GSE/RUNE verificados. Ela não contém nem
+depende de código do LuaTools. Na primeira abertura, `bridge-cli.cmd` cria uma `.venv` isolada e instala
+automaticamente a dependência declarada em `requirements-cli.txt`.
+
+No Windows, compile o núcleo e abra a CLI:
+
+```powershell
+zig build -Doptimize=ReleaseSafe
+.\bridge-cli.cmd
+```
+
+A abertura padrão mostra um menu com o estado da Steam e do Bridge. Escolha `1` para ativar o
+monitor e acompanhar os eventos ao vivo, `2` para consultar a compatibilidade dos jogos instalados,
+`3` para escolher um jogo e ver suas conquistas disponíveis ou `0` para sair. Nada começa a monitorar
+até o usuário escolher **Ativar Bridge**.
+
+O log também fica em `%LOCALAPPDATA%\AchievementBridge\bridge-cli.log`. `Ctrl+C` encerra o monitor
+e volta ao menu. A CLI recusa iniciar uma segunda instância por padrão; feche o LuaTools antes de
+usá-la standalone.
+
+Para automação ou uso avançado, o monitor também pode ser iniciado diretamente:
+
+```powershell
+.\bridge-cli.cmd start
+```
+
+Nesse modo, `--allow-duplicate` existe apenas para diagnóstico consciente.
+
+Para listar os jogos instalados:
+
+```powershell
+.\bridge-cli.cmd games
+.\bridge-cli.cmd games --json
+```
+
+Os estados exibidos são:
+
+- `COMPLETO`: o Bridge detecta o evento e sincroniza com a Steam;
+- `NATIVO`: Steamworks oficial, portanto o jogo não precisa do Bridge;
+- `SÓ DETECTA`: o evento é detectável, mas a CLI ainda não sincroniza sozinha;
+- `SEM SUPORTE`: runtime sem provider de conquistas implementado.
+
+O catálogo de um jogo também pode ser consultado diretamente pelo AppID:
+
+```powershell
+.\bridge-cli.cmd achievements 2638890
+```
+
+Quando uma conquista GSE/RUNE é emitida, a CLI relê o arquivo do provider e comprova que o mesmo
+AppID/API name está desbloqueado antes de escrever na Steam. Primeiro tenta `SetAchievement` +
+`StoreStats`; schemas protegidos usam o cache local nativo como fallback, com backup atômico.
+
+## Instalador Windows
+
+O instalador é gerado com Velopack 1.2.0. A CLI Typer/Rich é congelada em uma pasta standalone pelo
+PyInstaller, portanto o computador do usuário não precisa ter Python, Zig ou .NET instalado. O setup
+é por usuário, cria atalhos no Menu Iniciar e na área de trabalho, registra um desinstalador e já usa o
+formato de releases necessário para atualizações futuras.
+
+Para gerar uma release local a partir dos fontes:
+
+```powershell
+.\scripts\build-installer.ps1 -Version 0.1.0
+```
+
+O script compila e testa o núcleo Zig em `ReleaseSafe`, gera o ícone, empacota a CLI e grava o setup,
+o pacote completo e o feed Velopack em `dist`. Para reconstruir com binários Zig já existentes e
+limpar os artefatos de release anteriores:
+
+```powershell
+.\scripts\build-installer.ps1 -Version 0.1.0 -SkipZigBuild -CleanReleases
+```
+
+As ferramentas de build ficam fixadas em `requirements-build.txt` e `.config/dotnet-tools.json`.
 
 ## GSE / Goldberg-compatible
 
@@ -33,7 +112,14 @@ O LuaTools usa `watch-all`, que mantém GSE, RUNE, Ubisoft oficial e Uplay R2 em
 zig build run -- watch-all --no-notifications
 ```
 
-Os eventos continuam num único stream ordenado; o popup rico e a sincronização local ficam sob responsabilidade do LuaTools.
+Os eventos continuam num único stream ordenado; o popup rico e a sincronização local ficam sob responsabilidade do LuaTools. Um worker de sessões também informa quando um executável de jogo abre ou fecha e quais providers foram detectados. O processo persistente não inicializa o cliente Steam nem assume um App ID. Ao receber uma conquista, o LuaTools consulta o catálogo e sincroniza a Steam por comandos Bridge de curta duração, evitando que um jogo permaneça incorretamente marcado como aberto.
+
+A CLI standalone faz a mesma orquestração para GSE/RUNE. O comando verificado GSE também pode ser
+usado diretamente:
+
+```powershell
+achievement-bridge gse-steam-sync --appid 2638890 --achievement ACHIEVEMENT_002
+```
 
 ## RUNE
 
@@ -138,7 +224,7 @@ Esse comando não tem confirmação manual porque não é uma tela de edição: 
 - atualiza o overlay em memória da Steam pelo host carregado no processo;
 - é idempotente, portanto repetir o mesmo evento não muda o timestamp original.
 
-O OpenSteamTool aceita uma única biblioteca em `[cloud].library`. Por isso, o host `achievement-bridge-cloud.dll` funciona como proxy: quando encontra `<Steam>\cloud_redirect.dll`, ele carrega a instalação existente e encaminha toda a ABI para preservar redirecionamento, sincronização e gravação dos saves; sem o CloudRedirect, continua oferecendo sozinho a parte necessária às conquistas. O overlay confirmado é persistido por conta em `<Steam>\AchievementBridge\achievement-overlays-v1.bin`, com cabeçalho versionado, CRC e substituição atômica, e recarregado na próxima sessão da Steam. O LuaTools copia o host para `<Steam>\AchievementBridge`, configura o caminho em `opensteamtool.toml` e ele passa a valer na próxima abertura da Steam. Depois dessa instalação inicial, nenhum desbloqueio fecha ou reabre a Steam.
+O OpenSteamTool aceita uma única biblioteca em `[cloud].library`. Por isso, o host `achievement-bridge-cloud.dll` funciona como proxy: quando encontra `<Steam>\cloud_redirect.dll`, ele carrega a instalação existente e encaminha toda a ABI para preservar redirecionamento, sincronização e gravação dos saves; sem o CloudRedirect, continua oferecendo sozinho a parte necessária às conquistas. O overlay confirmado é persistido por conta em `<Steam>\AchievementBridge\achievement-overlays-v1.bin`, com cabeçalho versionado, CRC e substituição atômica, e recarregado na próxima sessão da Steam. A CLI standalone instala uma cópia versionada do host em `<Steam>\AchievementBridge` e configura `opensteamtool.toml` automaticamente ao iniciar o monitor; o mesmo preparo pode ser executado explicitamente com `achievement-bridge-cli setup`. A alteração passa a valer na próxima abertura da Steam. Depois dessa instalação inicial, nenhum desbloqueio fecha ou reabre a Steam.
 
 O resultado é local ao cliente Desktop, como no teste do Black Flag: a biblioteca e a UI do PC podem refletir a conquista, mas celular, perfil e servidor continuam inalterados porque esse fluxo não chama `StoreStats`.
 
@@ -226,7 +312,12 @@ zig build run -- host
 
 ## Journal
 
-Por padrão, o journal fica em `%LOCALAPPDATA%\AchievementBridge\journal.jsonl`. No primeiro contato com um jogo/provider, conquistas antigas formam o baseline e não geram eventos. Em execuções posteriores, uma conquista nova encontrada no snapshot e ausente do journal é emitida com `recovered=true`. As chaves incluem o provider para impedir colisões entre IDs Steam, Ubisoft e GSE.
+Por padrão, o journal fica em `%LOCALAPPDATA%\AchievementBridge\journal.jsonl`. No primeiro contato
+com um save que já existia antes do monitor, conquistas antigas formam o baseline e não geram eventos.
+Se o GSE criar seu primeiro snapshot enquanto o monitor já está rodando, a primeira conquista é
+tratada como evento ao vivo e não é engolida pelo baseline. Em execuções posteriores, uma conquista
+nova encontrada no snapshot e ausente do journal é emitida com `recovered=true`. As chaves incluem o
+provider para impedir colisões entre IDs Steam, Ubisoft e GSE.
 
 ## Estado da implementação
 
@@ -243,6 +334,7 @@ Implementado:
 - parser offline do spool oficial Ubisoft Connect;
 - diagnóstico e watcher de saves Uplay R2-compatible;
 - parser INI, descoberta e watcher de saves RUNE;
+- CLI Python standalone com logs, inventário de compatibilidade e sync verificado GSE/RUNE;
 - validação Ed25519 de manifest, SHA-256/assinatura de artefatos e cache atômico com rollback;
 - build e testes no Zig 0.16.0.
 
