@@ -1,19 +1,31 @@
 import unittest
 from pathlib import Path
 
+from typer.testing import CliRunner
+
 from achievement_bridge_cli import (
+    CliOptions,
     EventParser,
+    app,
     best_provider,
-    build_parser,
     classify_support,
-    menu_start_namespace,
+    menu_start_options,
     parse_achievement_count,
+    parse_available_achievements,
     parse_installed_games,
     parse_provider_candidates,
 )
 
 
 class CliParsingTests(unittest.TestCase):
+    def test_typer_help_lists_public_commands(self) -> None:
+        result = CliRunner().invoke(app, ["--help"])
+
+        self.assertEqual(0, result.exit_code)
+        self.assertIn("achievements", result.stdout)
+        self.assertIn("games", result.stdout)
+        self.assertIn("start", result.stdout)
+
     def test_parses_installed_game_with_spaces(self) -> None:
         games = parse_installed_games(
             "[AchievementBridge] steam_root=C:\\steam installed_apps=1\n"
@@ -38,12 +50,12 @@ Provider candidates:
 
         self.assertEqual({"gse": 100, "steam": 45}, candidates)
         self.assertEqual(("gse", 100), best_provider(candidates))
-        self.assertEqual("PRONTO", classify_support("gse", 100, 52))
+        self.assertEqual("COMPLETO", classify_support("gse", 100, 52))
 
     def test_classifies_native_and_unsupported_games(self) -> None:
         self.assertEqual("NATIVO", classify_support("steam", 75, None))
-        self.assertEqual("NÃO SUPORTADO", classify_support("epic", 85, None))
-        self.assertEqual("MONITORA", classify_support("ubisoft", 90, None))
+        self.assertEqual("SEM SUPORTE", classify_support("epic", 85, None))
+        self.assertEqual("SÓ DETECTA", classify_support("ubisoft", 90, None))
 
     def test_reads_steam_schema_count(self) -> None:
         self.assertEqual(52, parse_achievement_count("[SteamAdapter] connected=true appid=2638890 achievements=52"))
@@ -73,12 +85,22 @@ Provider candidates:
         self.assertEqual("ACHIEVEMENT_002", event.achievement)
         self.assertFalse(event.recovered)
 
-    def test_interactive_menu_starts_with_safe_monitor_defaults(self) -> None:
-        parser = build_parser()
-        menu_args = parser.parse_args(["--steam-root", "C:\\steam", "menu"])
-        monitor_args = menu_start_namespace(menu_args)
+    def test_parses_available_achievement_catalog(self) -> None:
+        achievements = parse_available_achievements(
+            "[49] ACHIEVEMENT_050 locked name=Manopla Faminta global=64.50%\n"
+            "[50] ACHIEVEMENT_051 unlocked name=Fúria Selvagem unlock_time=1788574542 global=51.90%\n"
+        )
 
-        self.assertEqual("menu", menu_args.command)
+        self.assertEqual(2, len(achievements))
+        self.assertEqual("Manopla Faminta", achievements[0].name)
+        self.assertFalse(achievements[0].unlocked)
+        self.assertEqual(64.5, achievements[0].global_percent)
+        self.assertTrue(achievements[1].unlocked)
+
+    def test_interactive_menu_starts_with_safe_monitor_defaults(self) -> None:
+        menu_args = CliOptions(bridge=None, steam_root="C:\\steam")
+        monitor_args = menu_start_options(menu_args)
+
         self.assertEqual("C:\\steam", monitor_args.steam_root)
         self.assertTrue(monitor_args.no_scan)
         self.assertTrue(monitor_args.no_notifications)
