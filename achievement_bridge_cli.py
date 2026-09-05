@@ -322,7 +322,7 @@ def notification_preview_arguments(
     duration_ms: int = DEFAULT_NOTIFICATION_PREVIEW_MS,
     wait_for_game_dir: str | None = None,
 ) -> list[str]:
-    """Build the read-only Steam progress-toast request."""
+    """Build an explicitly confirmed temporary unlock/rollback request."""
     api_name = achievement.strip()
     if app_id <= 0:
         raise RuntimeError("o AppID precisa ser maior que zero")
@@ -341,6 +341,7 @@ def notification_preview_arguments(
         str(app_id),
         "--achievement",
         api_name,
+        "--confirm-steam-write",
         "--duration-ms",
         str(duration_ms),
     ]
@@ -366,7 +367,9 @@ def request_notification_preview(
         duration_ms,
         wait_for_game_dir,
     )
-    timeout = None if wait_for_game_dir is not None else max(45, duration_ms // 1000 + 15)
+    # Both StoreStats phases can be delayed by Steam's rate limiter. The Zig
+    # transaction remains responsible for restoring the locked state.
+    timeout = None if wait_for_game_dir is not None else max(300, duration_ms // 1000 + 270)
     result = run_bridge(bridge, arguments, timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(result.stdout.strip() or "não foi possível simular o popup da Steam")
@@ -636,6 +639,7 @@ def show_available_achievements(args: CliOptions, bridge: Path) -> None:
         choices=tuple(str(index) for index in range(0, len(eligible) + 1)),
         default="0",
         show_choices=False,
+        show_default=False,
     )
     if selected == "0":
         return
@@ -681,19 +685,30 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
         choices=tuple(str(index) for index in range(0, len(eligible) + 1)),
         default="0",
         show_choices=False,
+        show_default=False,
     )
     if selected == "0":
         return
 
     game = eligible[int(selected) - 1].game
-    achievements = read_available_achievements(bridge, game.app_id, args.steam_root)
+    achievements = [
+        achievement
+        for achievement in read_available_achievements(bridge, game.app_id, args.steam_root)
+        if not achievement.unlocked
+    ]
+    if not achievements:
+        console.print(Panel(
+            "Todas as conquistas desse jogo já estão desbloqueadas; não há estado seguro para restaurar.",
+            border_style="yellow",
+        ))
+        console.input("\nPressione Enter para voltar...")
+        return
     achievement_choices = Table(box=box.SIMPLE, header_style="bold cyan")
     achievement_choices.add_column("Opção", justify="right", style="bright_cyan")
     achievement_choices.add_column("Conquista")
-    achievement_choices.add_column("Estado")
+    achievement_choices.add_column("API name", style="dim")
     for index, achievement in enumerate(achievements, start=1):
-        state = "desbloqueada" if achievement.unlocked else "bloqueada"
-        achievement_choices.add_row(str(index), achievement.name, state)
+        achievement_choices.add_row(str(index), achievement.name, achievement.api_name)
     achievement_choices.add_row("0", "Voltar", "")
     console.print(achievement_choices)
     selected_achievement = Prompt.ask(
@@ -701,15 +716,20 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
         choices=tuple(str(index) for index in range(0, len(achievements) + 1)),
         default="0",
         show_choices=False,
+        show_default=False,
     )
     if selected_achievement == "0":
         return
 
     achievement = achievements[int(selected_achievement) - 1]
-    request_notification_preview(bridge, game.app_id, achievement.api_name, args.steam_root)
+    with console.status(
+        "[cyan]Solicitando o toast nativo e aguardando a Steam confirmar o rollback...[/]",
+        spinner="dots",
+    ):
+        request_notification_preview(bridge, game.app_id, achievement.api_name, args.steam_root)
     console.print(Panel(
-        f"Prévia nativa solicitada para [bold]{achievement.name}[/] ({game.name}).\n"
-        "A Steam mostra progresso 1/2; a conquista e os stats não são alterados.",
+        f"Toast nativo solicitado para [bold]{achievement.name}[/] ({game.name}).\n"
+        "O desbloqueio temporário foi revertido e a conquista voltou a ficar bloqueada.",
         title="[bold green]Simulação concluída[/]",
         border_style="green",
     ))
@@ -741,6 +761,7 @@ def interactive_menu(args: CliOptions, bridge: Path) -> int:
                 choices=("1", "2", "3", "4", "5", "0"),
                 default="1",
                 show_choices=False,
+                show_default=False,
             )
         except (EOFError, KeyboardInterrupt):
             return 0
@@ -1021,7 +1042,7 @@ def simulate_popup_command(
         typer.Option(
             min=MIN_NOTIFICATION_PREVIEW_MS,
             max=MAX_NOTIFICATION_PREVIEW_MS,
-            help="Tempo para manter a sessão da prévia ativa, em milissegundos",
+            help="Tempo antes do rollback, em milissegundos",
         ),
     ] = DEFAULT_NOTIFICATION_PREVIEW_MS,
     wait_for_game: Annotated[
@@ -1033,7 +1054,7 @@ def simulate_popup_command(
         typer.Option(help="Pasta do jogo usada por --wait-for-game"),
     ] = None,
 ) -> None:
-    """Simule o popup nativo de progresso sem desbloquear a conquista."""
+    """Exiba o toast real com desbloqueio temporário e rollback."""
     options = get_cli_options(context)
     bridge = resolve_bridge(options.bridge)
     wait_for_game_dir = (game_dir or "") if wait_for_game else None
@@ -1046,8 +1067,8 @@ def simulate_popup_command(
         wait_for_game_dir,
     ))
     console.print(Panel(
-        f"Prévia nativa solicitada para [bold]{achievement}[/] (AppID {app_id}).\n"
-        "A Steam mostra progresso 1/2; a conquista e os stats não são alterados.",
+        f"Toast nativo solicitado para [bold]{achievement}[/] (AppID {app_id}).\n"
+        "O desbloqueio temporário foi revertido e a conquista voltou a ficar bloqueada.",
         title="[bold green]Simulação concluída[/]",
         border_style="green",
     ))
