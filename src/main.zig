@@ -447,23 +447,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("[NotificationPreview] status=game_detected\n", .{});
         }
         const steam_root = if (cli.steam_root) |root| try allocator.dupe(u8, root) else try bridge.detector.steam_install.findSteamRoot(allocator, init.io);
-        var session = try bridge.steam.adapter.connect(allocator, app_id, steam_root);
-        defer session.close();
-        var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
-        defer achievements.deinit();
-        const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
-        const now = unixNow(init.io);
-        var notifier = try bridge.notifications.windows.Notifier.init();
-        defer notifier.deinit();
-        try notifier.show(allocator, .{
-            .app_id = app_id,
-            .source_id = numericSuffix(achievement.api_name) orelse achievement.api_name,
-            .provider = .uplay_r2,
-            .unlocked_at = now,
-            .detected_at = now,
-        }, achievement.name, achievement.description, achievement.global_percent);
-        std.debug.print("[NotificationPreview] appid={d} achievement={s} name={s} duration_ms={d}\n", .{ app_id, achievement.api_name, achievement.name, cli.duration_ms });
-        try std.Io.sleep(init.io, .fromMilliseconds(cli.duration_ms), .awake);
+        try simulateSteamNotification(allocator, init.io, app_id, steam_root, wanted, cli.duration_ms);
         return;
     }
 
@@ -925,6 +909,39 @@ fn findAchievement(items: []const bridge.steam.user_stats.AchievementState, want
     return null;
 }
 
+fn simulateSteamNotification(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    app_id: u32,
+    steam_root: []const u8,
+    wanted: []const u8,
+    duration_ms: u32,
+) !void {
+    var session = try bridge.steam.adapter.connect(allocator, app_id, steam_root);
+    defer session.close();
+    try session.client.loadCurrentUserStats(io, app_id, 5000);
+    var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
+    defer achievements.deinit();
+    const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
+    const state_before = achievement.unlocked;
+
+    try bridge.steam.adapter.queueAchievementProgressNotification(&session, allocator, io, achievement.api_name);
+    const state_after = try bridge.steam.adapter.isAchievementUnlocked(&session, allocator, achievement.api_name);
+    if (state_before != state_after) return error.NotificationPreviewChangedAchievementState;
+    std.debug.print(
+        "[SteamNotificationPreview] appid={d} achievement={s} name={s} progress=1/2 state_before={s} state_after={s} set_achievement=false store_stats=false duration_ms={d}\n",
+        .{
+            app_id,
+            achievement.api_name,
+            achievement.name,
+            if (state_before) "unlocked" else "locked",
+            if (state_after) "unlocked" else "locked",
+            duration_ms,
+        },
+    );
+    try std.Io.sleep(io, .fromMilliseconds(duration_ms), .awake);
+}
+
 fn numericSuffix(api_name: []const u8) ?[]const u8 {
     var start = api_name.len;
     while (start > 0 and std.ascii.isDigit(api_name[start - 1])) start -= 1;
@@ -1024,6 +1041,28 @@ test "parse experimental Steam notification opt-in" {
     defer cli.schema_paths.deinit(allocator);
     try std.testing.expectEqual(Command.steam_local_sync, cli.command);
     try std.testing.expect(cli.experimental_steam_notification);
+}
+
+test "parse read-only Steam notification preview" {
+    const allocator = std.testing.allocator;
+    var cli = try parseArgs(allocator, &.{
+        "achievement-bridge",
+        "notify-test",
+        "--appid",
+        "2638890",
+        "--achievement",
+        "ACHIEVEMENT_050",
+        "--duration-ms",
+        "9000",
+    });
+    defer cli.roots.deinit(allocator);
+    defer cli.schema_paths.deinit(allocator);
+    try std.testing.expectEqual(Command.notify_test, cli.command);
+    try std.testing.expectEqual(@as(u32, 2638890), cli.app_id.?);
+    try std.testing.expectEqualStrings("ACHIEVEMENT_050", cli.achievement_id.?);
+    try std.testing.expectEqual(@as(u32, 9000), cli.duration_ms);
+    try std.testing.expect(!cli.confirm_steam_write);
+    try std.testing.expect(!cli.confirm_local_write);
 }
 
 test "parse RUNE watcher command" {

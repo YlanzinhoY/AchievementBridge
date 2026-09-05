@@ -41,9 +41,9 @@ pub fn isAchievementUnlocked(session: *const Session, allocator: std.mem.Allocat
     return session.client.user_stats.isAchievementUnlocked(api_name_z);
 }
 
-/// Displays the native progress toast after the caller has independently
-/// confirmed a durable local cache and overlay. The ABI may still report the
-/// achievement as locked for publisher-protected schemas.
+/// Displays a native 1/2 progress toast without calling SetAchievement or
+/// StoreStats. Sync callers may use it after confirming their durable local
+/// state; the notification-preview command uses it without writing any state.
 pub fn queueAchievementProgressNotification(session: *Session, allocator: std.mem.Allocator, io: std.Io, api_name: []const u8) !void {
     if (api_name.len == 0 or api_name.len > 127 or std.mem.indexOfScalar(u8, api_name, 0) != null) return error.InvalidAchievementApiName;
     const api_name_z = try allocator.dupeZ(u8, api_name);
