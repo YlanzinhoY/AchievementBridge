@@ -183,6 +183,43 @@ Provider candidates:
         with self.assertRaisesRegex(RuntimeError, "pasta do jogo"):
             notification_preview_arguments(2638890, "ACHIEVEMENT_050", None, wait_for_game_dir="")
 
+    def test_popup_menu_returns_to_achievement_list_after_preview(self) -> None:
+        report = cli.SupportReport(
+            game=cli.InstalledGame(2638890, "Onimusha: Way of the Sword", Path("D:\\OnimushaWotS")),
+            provider="gse",
+            confidence=100,
+            achievement_count=52,
+            status="COMPLETO",
+        )
+        achievement = cli.AvailableAchievement(
+            index=0,
+            api_name="ACHIEVEMENT_001",
+            unlocked=False,
+            name="Inigualável",
+            global_percent=0.0,
+        )
+
+        with (
+            patch.object(cli, "inspect_installed_games", return_value=[report]),
+            patch.object(cli, "read_available_achievements", return_value=[achievement]) as read,
+            patch.object(cli, "request_notification_preview") as preview,
+            patch.object(cli, "clear_screen"),
+            patch.object(cli, "print_banner"),
+            patch.object(cli.console, "print"),
+            patch.object(cli.console, "status") as status,
+            patch.object(cli.Prompt, "ask", side_effect=["1", "1", "0", "0"]),
+        ):
+            cli.simulate_popup(CliOptions(steam_root="C:\\steam"), Path("achievement-bridge.exe"))
+
+        self.assertEqual(2, read.call_count)
+        preview.assert_called_once_with(
+            Path("achievement-bridge.exe"),
+            2638890,
+            "ACHIEVEMENT_001",
+            "C:\\steam",
+        )
+        status.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
