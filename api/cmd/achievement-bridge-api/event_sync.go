@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/YlanzinhoY/AchievementBridge/api/internal/core"
 	"github.com/YlanzinhoY/AchievementBridge/api/internal/events"
 )
 
@@ -71,14 +70,14 @@ func syncProvider(provider string) bool {
 }
 
 type eventSyncer struct {
-	client      *core.Client
+	call        func(context.Context, string, any, any) error
 	broker      *events.Broker
 	once        sync.Once
 	nativeToast atomic.Bool
 }
 
-func newEventSyncer(client *core.Client, broker *events.Broker) *eventSyncer {
-	return &eventSyncer{client: client, broker: broker}
+func newEventSyncer(call func(context.Context, string, any, any) error, broker *events.Broker) *eventSyncer {
+	return &eventSyncer{call: call, broker: broker}
 }
 
 func (s *eventSyncer) Start(nativeToast bool) {
@@ -107,7 +106,7 @@ func (s *eventSyncer) run() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 		var result map[string]any
-		if err := s.client.Call(ctx, "sync_achievement", params, &result); err != nil {
+		if err := s.call(ctx, "sync_achievement", params, &result); err != nil {
 			log.Printf("automatic Steam sync failed appid=%d achievement=%s provider=%s: %v", event.AppID, event.Achievement, event.Provider, err)
 			return
 		}

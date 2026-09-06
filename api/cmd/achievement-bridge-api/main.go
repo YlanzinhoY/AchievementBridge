@@ -15,23 +15,39 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/YlanzinhoY/AchievementBridge/api/internal/core"
+	"github.com/YlanzinhoY/AchievementBridge/api/internal/events"
 )
 
 const (
-	defaultAPIAddress  = "127.0.0.1:47650"
-	defaultCoreAddress = "127.0.0.1:47651"
-	coreStartupTimeout = 3 * time.Minute
+	defaultAPIAddress   = "127.0.0.1:47650"
+	defaultCoreAddress  = "127.0.0.1:47651"
+	coreStartupTimeout  = 3 * time.Minute
+	coreRecoveryTimeout = 15 * time.Second
 )
 
 type application struct {
-	core       *core.Client
-	supervisor *core.Supervisor
+	core       coreCaller
+	supervisor coreSupervisor
 	eventSync  *eventSyncer
 	shutdown   func()
+
+	recoveryMu    sync.Mutex
+	monitorMu     sync.RWMutex
+	monitorParams map[string]any
+}
+
+type coreCaller interface {
+	Call(context.Context, string, any, any) error
+}
+
+type coreSupervisor interface {
+	Ensure(context.Context) error
+	Events() *events.Broker
 }
 
 type achievement struct {
@@ -106,8 +122,8 @@ func main() {
 	app := &application{
 		core:       coreClient,
 		supervisor: supervisor,
-		eventSync:  newEventSyncer(coreClient, supervisor.Events()),
 	}
+	app.eventSync = newEventSyncer(app.callCore, supervisor.Events())
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", app.health)
 	mux.HandleFunc("GET /v1/games", app.listGames)
@@ -143,6 +159,7 @@ func main() {
 	}
 	shutdownContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go app.watchCore(shutdownContext)
 	go func() {
 		<-shutdownContext.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -167,7 +184,7 @@ func (a *application) listGames(writer http.ResponseWriter, request *http.Reques
 	var result struct {
 		Games []gameSupport `json:"games"`
 	}
-	if err := a.core.Call(ctx, "inspect_games", map[string]any{"verify_schema": verifySchema}, &result); err != nil {
+	if err := a.callCore(ctx, "inspect_games", map[string]any{"verify_schema": verifySchema}, &result); err != nil {
 		writeCoreError(writer, err)
 		return
 	}
@@ -175,10 +192,10 @@ func (a *application) listGames(writer http.ResponseWriter, request *http.Reques
 }
 
 func (a *application) health(writer http.ResponseWriter, request *http.Request) {
-	ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(request.Context(), coreRecoveryTimeout+time.Second)
 	defer cancel()
 	var coreHealth map[string]any
-	if err := a.core.Call(ctx, "health", struct{}{}, &coreHealth); err != nil {
+	if err := a.callCore(ctx, "health", struct{}{}, &coreHealth); err != nil {
 		writeError(writer, http.StatusServiceUnavailable, "core_unavailable", err.Error())
 		return
 	}
@@ -198,7 +215,7 @@ func (a *application) listAchievements(writer http.ResponseWriter, request *http
 	ctx, cancel := context.WithTimeout(request.Context(), 45*time.Second)
 	defer cancel()
 	var catalog achievementCatalog
-	if err := a.core.Call(ctx, "list_achievements", map[string]any{"app_id": appID}, &catalog); err != nil {
+	if err := a.callCore(ctx, "list_achievements", map[string]any{"app_id": appID}, &catalog); err != nil {
 		writeCoreError(writer, err)
 		return
 	}
@@ -232,7 +249,7 @@ func (a *application) previewAchievement(writer http.ResponseWriter, request *ht
 		defer cancel()
 	}
 	var result map[string]any
-	if err := a.core.Call(ctx, "preview_achievement", input, &result); err != nil {
+	if err := a.callCore(ctx, "preview_achievement", input, &result); err != nil {
 		writeCoreError(writer, err)
 		return
 	}
@@ -255,7 +272,7 @@ func (a *application) rollbackAchievementPreview(writer http.ResponseWriter, req
 	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Minute)
 	defer cancel()
 	var result map[string]any
-	if err := a.core.Call(ctx, "rollback_achievement_preview", map[string]any{
+	if err := a.callCore(ctx, "rollback_achievement_preview", map[string]any{
 		"app_id":      input.AppID,
 		"achievement": input.Achievement,
 	}, &result); err != nil {
@@ -297,7 +314,7 @@ func (a *application) syncAchievement(writer http.ResponseWriter, request *http.
 	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Minute)
 	defer cancel()
 	var result map[string]any
-	if err := a.core.Call(ctx, "sync_achievement", params, &result); err != nil {
+	if err := a.callCore(ctx, "sync_achievement", params, &result); err != nil {
 		writeCoreError(writer, err)
 		return
 	}
@@ -314,7 +331,7 @@ func (a *application) prepareGameSupport(writer http.ResponseWriter, request *ht
 	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Minute)
 	defer cancel()
 	var result map[string]any
-	if err := a.core.Call(ctx, "prepare_game_support", map[string]any{"app_id": uint32(appID64)}, &result); err != nil {
+	if err := a.callCore(ctx, "prepare_game_support", map[string]any{"app_id": uint32(appID64)}, &result); err != nil {
 		writeCoreError(writer, err)
 		return
 	}
@@ -370,11 +387,91 @@ func (a *application) startMonitor(writer http.ResponseWriter, request *http.Req
 	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
 	defer cancel()
 	var result map[string]any
-	if err := a.core.Call(ctx, "start_monitor", params, &result); err != nil {
+	if err := a.callCore(ctx, "start_monitor", params, &result); err != nil {
 		writeCoreError(writer, err)
 		return
 	}
+	a.rememberMonitor(params)
 	writeJSON(writer, http.StatusOK, result)
+}
+
+func (a *application) callCore(ctx context.Context, method string, params any, result any) error {
+	err := a.core.Call(ctx, method, params, result)
+	if err == nil {
+		return nil
+	}
+	var remote *core.RemoteError
+	if errors.As(err, &remote) {
+		return err
+	}
+
+	a.recoveryMu.Lock()
+	defer a.recoveryMu.Unlock()
+
+	probeContext, cancelProbe := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	probeErr := a.core.Call(probeContext, "health", struct{}{}, nil)
+	cancelProbe()
+	if probeErr != nil {
+		recoveryContext, cancelRecovery := context.WithTimeout(context.Background(), coreRecoveryTimeout)
+		defer cancelRecovery()
+		if ensureErr := a.supervisor.Ensure(recoveryContext); ensureErr != nil {
+			return fmt.Errorf("recover Zig core after %v: %w", err, ensureErr)
+		}
+		if monitorParams := a.savedMonitor(); monitorParams != nil {
+			var ignored map[string]any
+			if restoreErr := a.core.Call(recoveryContext, "start_monitor", monitorParams, &ignored); restoreErr != nil {
+				return fmt.Errorf("restore monitoring after core recovery: %w", restoreErr)
+			}
+			log.Printf("Zig core recovered; achievement monitoring resumed")
+		} else {
+			log.Printf("Zig core recovered")
+		}
+	}
+	return a.core.Call(ctx, method, params, result)
+}
+
+func (a *application) rememberMonitor(params map[string]any) {
+	copyParams := make(map[string]any, len(params))
+	for key, value := range params {
+		copyParams[key] = value
+	}
+	a.monitorMu.Lock()
+	a.monitorParams = copyParams
+	a.monitorMu.Unlock()
+}
+
+func (a *application) savedMonitor() map[string]any {
+	a.monitorMu.RLock()
+	defer a.monitorMu.RUnlock()
+	if a.monitorParams == nil {
+		return nil
+	}
+	copyParams := make(map[string]any, len(a.monitorParams))
+	for key, value := range a.monitorParams {
+		copyParams[key] = value
+	}
+	return copyParams
+}
+
+func (a *application) watchCore(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if a.savedMonitor() == nil {
+				continue
+			}
+			probeContext, cancel := context.WithTimeout(context.Background(), coreRecoveryTimeout+time.Second)
+			var ignored map[string]any
+			if err := a.callCore(probeContext, "health", struct{}{}, &ignored); err != nil {
+				log.Printf("Zig core watchdog: %v", err)
+			}
+			cancel()
+		}
+	}
 }
 
 func (a *application) monitorEvents(writer http.ResponseWriter, request *http.Request) {
