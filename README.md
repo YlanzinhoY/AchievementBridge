@@ -111,14 +111,18 @@ O detector reconhece instalações Rockstar oficiais e compatíveis, incluindo j
 `socialclub.dll`, `title.rgl`, `socialclub_emu.ini` ou `RUNE64.dll`. O provider procura estados locais
 de conquistas nos perfis do Social Club e nos diretórios públicos usados por emuladores. A associação
 ao AppID compara dinamicamente o título e a pasta do perfil com toda a biblioteca Steam instalada;
-aliases conhecidos existem apenas como fallback. O provider só emite uma conquista após reler um campo explícito de
-desbloqueio em JSON ou INI.
+aliases conhecidos existem apenas como fallback. O provider só emite uma conquista após reler uma evidência local
+verificável. Além de campos explícitos em JSON ou INI, o GTA V Enhanced possui um adaptador conservador para o
+cabeçalho público dos saves `SGTA*`: progresso igual ou superior a 1,6% comprova `ACH00` (fim de "Franklin e
+Lamar") sem tentar decodificar ou alterar o restante do save.
 
 O catálogo, os nomes e as imagens continuam vindo da Steam. Se o runtime for detectado, mas o perfil
 só contiver blobs proprietários como `cfg.dat`, `pc_settings.bin` ou um `achievements.dat` não
 decodificável, a CLI mostra `AGUARDA DADOS`: as conquistas podem ser consultadas e usadas no simulador,
 mas o Bridge não adivinha nem envia desbloqueios. Assim que um estado legível aparecer, o watcher cria
-o baseline e passa a sincronizar apenas transições novas de bloqueada para desbloqueada.
+o baseline e passa a sincronizar apenas transições novas de bloqueada para desbloqueada. O adaptador `SGTA*`
+atualmente prova somente o primeiro marco de história; as demais conquistas do GTA continuam bloqueadas até que
+exista evidência específica no estado local.
 
 Quando uma conquista GSE/RUNE/Rockstar é emitida, a CLI relê o arquivo do provider e comprova que o mesmo
 AppID/API name está desbloqueado antes de escrever na Steam. Primeiro tenta `SetAchievement` +
@@ -134,7 +138,7 @@ formato de releases necessário para atualizações futuras.
 Para gerar uma release local a partir dos fontes:
 
 ```powershell
-.\scripts\build-installer.ps1 -Version 0.1.5
+.\scripts\build-installer.ps1 -Version 0.1.6
 ```
 
 O script compila o núcleo Zig em `ReleaseSafe`, executa a suíte existente, compila o gateway Go, gera o ícone, empacota a CLI e grava o setup,
@@ -142,7 +146,7 @@ o pacote completo e o feed Velopack em `dist`. Para reconstruir com binários Zi
 limpar os artefatos de release anteriores:
 
 ```powershell
-.\scripts\build-installer.ps1 -Version 0.1.5 -SkipZigBuild -SkipGoBuild -CleanReleases
+.\scripts\build-installer.ps1 -Version 0.1.6 -SkipZigBuild -SkipGoBuild -CleanReleases
 ```
 
 As ferramentas de build ficam fixadas em `requirements-build.txt` e `.config/dotnet-tools.json`.
