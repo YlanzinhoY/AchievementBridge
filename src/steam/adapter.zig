@@ -38,6 +38,11 @@ pub const NotificationRequestResult = enum {
     progress_queued,
 };
 
+pub const PreviewResult = enum {
+    unlock_rolled_back,
+    progress_queued,
+};
+
 pub fn isAchievementUnlocked(session: *const Session, allocator: std.mem.Allocator, api_name: []const u8) !bool {
     if (api_name.len == 0 or api_name.len > 127 or std.mem.indexOfScalar(u8, api_name, 0) != null) return error.InvalidAchievementApiName;
     const api_name_z = try allocator.dupeZ(u8, api_name);
@@ -105,17 +110,16 @@ pub fn unlockAchievement(session: *Session, allocator: std.mem.Allocator, io: st
     return .stored;
 }
 
-/// Triggers Steam's real achievement-unlocked toast, keeps it visible long
-/// enough for inspection, then restores the original locked state. This is an
-/// explicit testing operation and refuses achievements that were already
-/// unlocked so their legitimate state and timestamp cannot be destroyed.
+/// Triggers Steam's real achievement-unlocked toast and rolls it back. Schemas
+/// that reject SetAchievement fall back to Steam's native 1/2 progress toast,
+/// which changes no achievement state and therefore needs no rollback.
 pub fn previewAchievementUnlock(
     session: *Session,
     allocator: std.mem.Allocator,
     io: std.Io,
     api_name: []const u8,
     hold_ms: u32,
-) !void {
+) !PreviewResult {
     if (api_name.len == 0 or api_name.len > 127 or std.mem.indexOfScalar(u8, api_name, 0) != null) return error.InvalidAchievementApiName;
     const api_name_z = try allocator.dupeZ(u8, api_name);
     defer allocator.free(api_name_z);
@@ -123,8 +127,11 @@ pub fn previewAchievementUnlock(
     try session.client.loadCurrentUserStats(io, session.app_id, 10_000);
     if (try session.client.user_stats.isAchievementUnlocked(api_name_z))
         return error.AchievementAlreadyUnlockedForPreview;
-    if (!session.client.user_stats.setAchievement(api_name_z))
-        return error.SetAchievementFailed;
+    if (!session.client.user_stats.setAchievement(api_name_z)) {
+        if (!session.client.user_stats.indicateAchievementProgress(api_name_z, 1, 2))
+            return error.AchievementProgressNotificationFailed;
+        return .progress_queued;
+    }
 
     var rollback_required = true;
     defer {
@@ -146,6 +153,7 @@ pub fn previewAchievementUnlock(
     try session.client.loadCurrentUserStats(io, session.app_id, 10_000);
     if (try session.client.user_stats.isAchievementUnlocked(api_name_z))
         return error.AchievementPreviewRollbackUnconfirmed;
+    return .unlock_rolled_back;
 }
 
 /// Completes a rollback that was left pending by an interrupted notification

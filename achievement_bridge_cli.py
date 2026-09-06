@@ -985,7 +985,12 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
                     "[cyan]Solicitando o toast nativo e aguardando a Steam confirmar o rollback...[/]",
                     spinner="dots",
                 ):
-                    request_notification_preview(bridge, game.app_id, achievement.api_name, args.steam_root)
+                    preview_result = request_notification_preview(
+                        bridge,
+                        game.app_id,
+                        achievement.api_name,
+                        args.steam_root,
+                    )
             except RuntimeError as error:
                 achievement_notice = (
                     str(error),
@@ -993,12 +998,17 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
                     "red",
                 )
             else:
-                achievement_notice = (
-                    f"Toast nativo exibido para [bold]{achievement.name}[/].\n"
-                    "O rollback foi confirmado; escolha outra conquista para continuar testando.",
-                    "[bold green]Simulação concluída[/]",
-                    "green",
-                )
+                if preview_result.get("preview_mode") == "progress_queued":
+                    message = (
+                        f"Toast nativo de progresso exibido para [bold]{achievement.name}[/].\n"
+                        "O schema bloqueia SetAchievement; nenhum estado foi alterado e não houve rollback."
+                    )
+                else:
+                    message = (
+                        f"Toast nativo de desbloqueio exibido para [bold]{achievement.name}[/].\n"
+                        "O rollback foi confirmado; escolha outra conquista para continuar testando."
+                    )
+                achievement_notice = (message, "[bold green]Simulação concluída[/]", "green")
 
 
 def interactive_menu(args: CliOptions, bridge: Path) -> int:
@@ -1298,7 +1308,7 @@ def simulate_popup_command(
     options = get_cli_options(context)
     bridge = resolve_bridge(options.bridge)
     wait_for_game_dir = (game_dir or "") if wait_for_game else None
-    exit_on_failure(lambda: request_notification_preview(
+    result = exit_on_failure(lambda: request_notification_preview(
         bridge,
         app_id,
         achievement,
@@ -1306,9 +1316,18 @@ def simulate_popup_command(
         duration_ms,
         wait_for_game_dir,
     ))
+    if result.get("preview_mode") == "progress_queued":
+        details = (
+            f"Toast nativo de progresso solicitado para [bold]{achievement}[/] (AppID {app_id}).\n"
+            "O schema bloqueia o desbloqueio de teste; nenhum estado foi alterado."
+        )
+    else:
+        details = (
+            f"Toast nativo de desbloqueio solicitado para [bold]{achievement}[/] (AppID {app_id}).\n"
+            "O desbloqueio temporário foi revertido e a conquista voltou a ficar bloqueada."
+        )
     console.print(Panel(
-        f"Toast nativo solicitado para [bold]{achievement}[/] (AppID {app_id}).\n"
-        "O desbloqueio temporário foi revertido e a conquista voltou a ficar bloqueada.",
+        details,
         title="[bold green]Simulação concluída[/]",
         border_style="green",
     ))

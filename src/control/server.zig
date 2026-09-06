@@ -468,15 +468,16 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
             achievement.api_name,
             unixNow(state.io),
         );
-        try bridge.steam.adapter.previewAchievementUnlock(&session, allocator, state.io, achievement.api_name, duration_ms);
+        const preview = try bridge.steam.adapter.previewAchievementUnlock(&session, allocator, state.io, achievement.api_name, duration_ms);
         try bridge.steam.preview_transaction.clear(state.io, state.preview_transaction_path);
         try writeSuccess(allocator, writer, request.id, .{
             .app_id = app_id,
             .achievement = achievement.api_name,
             .name = achievement.name,
-            .native_unlock_toast = true,
-            .temporary_unlock_stored = true,
-            .rollback_stored = true,
+            .preview_mode = @tagName(preview),
+            .native_unlock_toast = preview == .unlock_rolled_back,
+            .temporary_unlock_stored = preview == .unlock_rolled_back,
+            .rollback_stored = preview == .unlock_rolled_back,
             .state_after = "locked",
         });
         return;

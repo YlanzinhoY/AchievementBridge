@@ -907,14 +907,18 @@ fn simulateSteamNotification(
         achievement.api_name,
         unixNow(io),
     );
-    try bridge.steam.adapter.previewAchievementUnlock(&session, allocator, io, achievement.api_name, duration_ms);
+    const preview = try bridge.steam.adapter.previewAchievementUnlock(&session, allocator, io, achievement.api_name, duration_ms);
     try bridge.steam.preview_transaction.clear(io, preview_transaction_path);
     std.debug.print(
-        "[SteamNotificationPreview] appid={d} achievement={s} name={s} native_unlock_toast=true temporary_unlock_stored=true rollback_stored=true state_after=locked requested_duration_ms={d}\n",
+        "[SteamNotificationPreview] appid={d} achievement={s} name={s} preview_mode={s} native_unlock_toast={} temporary_unlock_stored={} rollback_stored={} state_after=locked requested_duration_ms={d}\n",
         .{
             app_id,
             achievement.api_name,
             achievement.name,
+            @tagName(preview),
+            preview == .unlock_rolled_back,
+            preview == .unlock_rolled_back,
+            preview == .unlock_rolled_back,
             duration_ms,
         },
     );
