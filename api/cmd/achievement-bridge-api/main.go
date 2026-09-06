@@ -30,6 +30,7 @@ const (
 type application struct {
 	core       *core.Client
 	supervisor *core.Supervisor
+	eventSync  *eventSyncer
 	shutdown   func()
 }
 
@@ -102,7 +103,11 @@ func main() {
 	cancel()
 	defer supervisor.Close()
 
-	app := &application{core: coreClient, supervisor: supervisor}
+	app := &application{
+		core:       coreClient,
+		supervisor: supervisor,
+		eventSync:  newEventSyncer(coreClient, supervisor.Events()),
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", app.health)
 	mux.HandleFunc("GET /v1/games", app.listGames)
@@ -322,6 +327,7 @@ func (a *application) startMonitor(writer http.ResponseWriter, request *http.Req
 		JournalPath   *string `json:"journal_path,omitempty"`
 		Recover       *bool   `json:"recover,omitempty"`
 		Notifications *bool   `json:"notifications,omitempty"`
+		NativeToast   *bool   `json:"native_toast,omitempty"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 64*1024))
 	decoder.DisallowUnknownFields()
@@ -350,10 +356,17 @@ func (a *application) startMonitor(writer http.ResponseWriter, request *http.Req
 	if input.Notifications != nil {
 		params["notifications"] = *input.Notifications
 	}
+	nativeToast := true
+	if input.NativeToast != nil {
+		nativeToast = *input.NativeToast
+	}
 	// A new UI monitoring session must not replay achievements from an older
 	// session. Lines emitted between this reset and the SSE subscription remain
 	// buffered, so startup events cannot be missed.
 	a.supervisor.Events().ClearHistory()
+	if a.eventSync != nil {
+		a.eventSync.Start(nativeToast)
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
 	defer cancel()
 	var result map[string]any
