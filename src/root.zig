@@ -25,6 +25,9 @@ pub const notifications = struct {
 pub const local = struct {
     pub const store = @import("local/store.zig");
 };
+pub const control = struct {
+    pub const server = @import("control/server.zig");
+};
 pub const steam = struct {
     pub const adapter = @import("steam/adapter.zig");
     pub const binary_key_values = @import("steam/binary_key_values.zig");
