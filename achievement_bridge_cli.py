@@ -958,7 +958,6 @@ def interactive_menu(args: CliOptions, bridge: Path) -> int:
             choice = Prompt.ask(
                 "[bold]Escolha uma opção[/]",
                 choices=("1", "2", "3", "4", "5", "0"),
-                default="1",
                 show_choices=False,
                 show_default=False,
             )
