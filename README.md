@@ -17,7 +17,7 @@ Os artefatos serão criados em `zig-out/bin/achievement-bridge.exe`, `zig-out/bi
 
 A interface Python cuida somente de entrada e apresentação. Catálogo, descoberta de jogos e simulação de toast são solicitados à API Go em `127.0.0.1:47650`. O gateway inicia e supervisiona o núcleo Zig persistente, comunicando-se com ele por JSON delimitado por linha em `127.0.0.1:47651`. Apenas o Zig conhece a ABI Steam e controla a sessão durante cada operação completa; o Go traduz o protocolo interno para HTTP/JSON e nenhum dos dois serviços aceita conexões fora do loopback.
 
-Essa divisão evita criar um novo processo Zig a cada clique e deixa uma futura GUI consumir a mesma API sem duplicar regras. O contrato e os limites de cada camada estão detalhados em [`docs/architecture.md`](docs/architecture.md).
+Essa divisão evita criar um novo processo Zig a cada clique e deixa uma futura GUI consumir a mesma API sem duplicar regras. Ao ativar o monitor, os providers passam a rodar dentro desse mesmo core e os logs chegam à interface por Server-Sent Events. O estado normal é um processo `achievement-bridge.exe` e um processo `achievement-bridge-api.exe`; a sincronização de um evento também atravessa a API, sem abrir um segundo Zig. O contrato e os limites de cada camada estão detalhados em [`docs/architecture.md`](docs/architecture.md).
 
 ## CLI aberta
 
@@ -88,7 +88,9 @@ baixo nível é obrigatório informar `--confirm-steam-write`.
 
 Se a Steam entregar um callback atrasado ou aplicar rate limit, cada fase drena callbacks antigos e
 faz até três tentativas controladas. Se o processo falhar depois do `SetAchievement`, o Bridge ainda
-tenta o rollback no bloco de limpeza.
+tenta o rollback no bloco de limpeza. Antes do desbloqueio temporário, o core também grava
+`%LOCALAPPDATA%\AchievementBridge\preview-transaction-v1.json`; se o processo ou o Windows for
+interrompido, a próxima inicialização conclui o rollback e só então remove esse registro.
 Durante os poucos segundos da prévia, o desbloqueio é enviado à Steam de verdade; portanto esse modo
 deve ser usado apenas para testes conscientes. O simulador não altera saves nem usa popup do Windows.
 No menu interativo, depois de cada rollback confirmado a CLI atualiza o catálogo e volta diretamente
@@ -141,13 +143,13 @@ Observar os roots GSE padrão com popup, som, recovery e metadata Steam automát
 zig build run -- watch
 ```
 
-O LuaTools usa `watch-all`, que mantém GSE, RUNE, Ubisoft oficial e Uplay R2 em workers isolados dentro de um único processo Bridge:
+O comando de compatibilidade `watch-all` mantém GSE, RUNE, Ubisoft oficial e Uplay R2 em workers isolados dentro de um único processo Bridge:
 
 ```powershell
 zig build run -- watch-all --no-notifications
 ```
 
-Os eventos continuam num único stream ordenado; o popup rico e a sincronização local ficam sob responsabilidade do LuaTools. Um worker de sessões também informa quando um executável de jogo abre ou fecha e quais providers foram detectados. O processo persistente não inicializa o cliente Steam nem assume um App ID. Ao receber uma conquista, o LuaTools consulta o catálogo e sincroniza a Steam por comandos Bridge de curta duração, evitando que um jogo permaneça incorretamente marcado como aberto.
+Na CLI standalone, esses mesmos workers são ativados dentro do core `serve` pela API Go. Os eventos seguem em um único stream SSE e voltam à interface para exibição; a sincronização GSE/RUNE retorna ao mesmo core por uma chamada estruturada. Um worker de sessões também informa quando um executável de jogo abre ou fecha e quais providers foram detectados. Cada acesso Steam continua limitado à duração da operação para evitar que um jogo permaneça incorretamente marcado como aberto.
 
 A CLI standalone faz a mesma orquestração para GSE/RUNE. O comando verificado GSE também pode ser
 usado diretamente:
