@@ -74,12 +74,13 @@ fn scanRoot(
 fn isReadableState(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !bool {
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(16 * 1024 * 1024)) catch return false;
     defer allocator.free(bytes);
-    var parsed = snapshot.parse(allocator, bytes) catch return false;
+    var parsed = snapshot.parseFile(allocator, path, bytes) catch return false;
     parsed.deinit();
     return true;
 }
 
 fn isStateName(name: []const u8) bool {
+    if (std.ascii.startsWithIgnoreCase(name, "SGTA")) return true;
     for (state_names) |candidate| if (std.ascii.eqlIgnoreCase(name, candidate)) return true;
     return false;
 }

@@ -578,7 +578,7 @@ fn verifyRockstarUnlock(state: *State, allocator: std.mem.Allocator, app_id: u32
         if (candidate.app_id != app_id) continue;
         const bytes = try std.Io.Dir.cwd().readFileAlloc(state.io, candidate.state_file, allocator, .limited(16 * 1024 * 1024));
         defer allocator.free(bytes);
-        var snapshot = try bridge.providers.rockstar.snapshot.parse(allocator, bytes);
+        var snapshot = try bridge.providers.rockstar.snapshot.parseFile(allocator, candidate.state_file, bytes);
         defer snapshot.deinit();
         const achievement = snapshot.achievements.get(api_name) orelse continue;
         if (achievement.earned) return;

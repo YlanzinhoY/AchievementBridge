@@ -181,7 +181,7 @@ fn checkState(
 fn readSnapshot(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !snapshot.Snapshot {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(bytes);
-    return snapshot.parse(allocator, bytes);
+    return snapshot.parseFile(allocator, path, bytes);
 }
 
 fn isTracked(states: []const TrackedState, path: []const u8) bool {

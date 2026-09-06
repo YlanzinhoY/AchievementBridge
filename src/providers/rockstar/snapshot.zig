@@ -41,6 +41,51 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !Snapshot {
     return parseIni(allocator, trimmed);
 }
 
+pub fn parseFile(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8) !Snapshot {
+    const name = std.fs.path.basename(path);
+    if (std.ascii.startsWithIgnoreCase(name, "SGTA")) return parseGtaSave(allocator, bytes);
+    return parse(allocator, bytes);
+}
+
+fn parseGtaSave(allocator: std.mem.Allocator, bytes: []const u8) !Snapshot {
+    // Rockstar stores the autosave label as UTF-16LE in the public 260-byte
+    // header. The completion percentage is enough to prove ACH00: the first
+    // story achievement is awarded at the end of "Franklin and Lamar" (1.6%).
+    if (bytes.len < 8) return error.UnsupportedRockstarAchievementState;
+    var label_buffer: [256]u8 = undefined;
+    var label_len: usize = 0;
+    var index: usize = 4;
+    const end = @min(bytes.len, 260);
+    while (index + 1 < end and label_len < label_buffer.len) : (index += 2) {
+        if (bytes[index] == 0 and bytes[index + 1] == 0) break;
+        if (bytes[index + 1] != 0) continue;
+        label_buffer[label_len] = bytes[index];
+        label_len += 1;
+    }
+    const label = label_buffer[0..label_len];
+    const progress = gtaCompletionPercent(label) orelse return error.UnsupportedRockstarAchievementState;
+    var result = Snapshot.init(allocator);
+    errdefer result.deinit();
+    try put(&result, "ACH00", .{ .earned = progress >= 1.6 });
+    return result;
+}
+
+fn gtaCompletionPercent(label: []const u8) ?f64 {
+    const percent_index = std.mem.indexOfScalar(u8, label, '%') orelse return null;
+    var start = percent_index;
+    while (start > 0) {
+        const character = label[start - 1];
+        if (!std.ascii.isDigit(character) and character != '.' and character != ',') break;
+        start -= 1;
+    }
+    if (start == percent_index) return null;
+    var number_buffer: [32]u8 = undefined;
+    const number = label[start..percent_index];
+    if (number.len > number_buffer.len) return null;
+    for (number, 0..) |character, offset| number_buffer[offset] = if (character == ',') '.' else character;
+    return std.fmt.parseFloat(f64, number_buffer[0..number.len]) catch null;
+}
+
 fn looksLikeJsonArray(bytes: []const u8) bool {
     if (bytes.len < 2 or bytes[0] != '[') return false;
     var index: usize = 1;
@@ -245,4 +290,22 @@ test "Rockstar diff emits only a new verified unlock" {
     try std.testing.expectEqual(@as(usize, 1), events.len);
     try std.testing.expectEqual(event.ProviderKind.rockstar, events[0].provider);
     try std.testing.expectEqualStrings("ACH00", events[0].source_id);
+}
+
+test "parse GTA save header as verified first story milestone" {
+    const label = "(Autoarmazenamento) Franklin e Lamar (1.6%) - 09/06/26 02:25:33";
+    var bytes = [_]u8{0} ** 260;
+    for (label, 0..) |character, offset| bytes[4 + offset * 2] = character;
+    var save = try parseFile(std.testing.allocator, "SGTA50015", &bytes);
+    defer save.deinit();
+    try std.testing.expect(save.achievements.get("ACH00").?.earned);
+}
+
+test "GTA prologue save keeps first story milestone locked" {
+    const label = "(Autoarmazenamento) Prologo (0,8%) - 09/06/26 02:01:18";
+    var bytes = [_]u8{0} ** 260;
+    for (label, 0..) |character, offset| bytes[4 + offset * 2] = character;
+    var save = try parseFile(std.testing.allocator, "SGTA50015", &bytes);
+    defer save.deinit();
+    try std.testing.expect(!save.achievements.get("ACH00").?.earned);
 }
