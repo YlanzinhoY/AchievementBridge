@@ -935,6 +935,7 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
 
 
 def interactive_menu(args: CliOptions, bridge: Path) -> int:
+    api_client(bridge, args.steam_root).ensure_started()
     while True:
         clear_screen()
         print_status(bridge)
@@ -1033,6 +1034,11 @@ def start_monitor(args: MonitorOptions, bridge: Path) -> int:
         print("Já existe um Achievement Bridge rodando (provavelmente iniciado pelo LuaTools).")
         print("Feche o LuaTools ou use --allow-duplicate conscientemente.")
         return 2
+
+    # Starting the Bridge means the public local API must be available too.
+    # The gateway owns the persistent control core; the watcher below remains
+    # on the compatibility path until its event stream is migrated to Go.
+    api_client(bridge, args.steam_root).ensure_started()
 
     log_path = None if args.no_file_log else Path(args.log or default_log_path())
     log = LogSink(log_path)
