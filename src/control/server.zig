@@ -8,6 +8,17 @@ pub const Options = struct {
     port: u16 = default_port,
     steam_root: ?[]const u8 = null,
     preview_transaction_path: []const u8,
+    monitor: MonitorDefaults,
+};
+
+pub const MonitorDefaults = struct {
+    gse_roots: []const []const u8,
+    r2_roots: []const []const u8,
+    rune_roots: []const []const u8,
+    spool_root: []const u8,
+    journal_path: []const u8,
+    replay_guard_path: []const u8,
+    backup_root: []const u8,
 };
 
 const Request = struct {
@@ -23,6 +34,13 @@ const Params = struct {
     duration_ms: ?u32 = null,
     wait_for_game_dir: ?[]const u8 = null,
     verify_schema: bool = false,
+    interval_ms: u32 = 500,
+    journal_path: ?[]const u8 = null,
+    recover: bool = true,
+    notifications: bool = true,
+    provider: ?[]const u8 = null,
+    timestamp: ?u32 = null,
+    native_toast: bool = true,
 };
 
 const GameSupport = struct {
@@ -40,18 +58,22 @@ const State = struct {
     io: std.Io,
     steam_root: ?[]u8,
     preview_transaction_path: []u8,
+    monitor: MonitorDefaults,
+    monitor_started: bool = false,
 
     fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         steam_root: ?[]const u8,
         preview_transaction_path: []const u8,
+        monitor: MonitorDefaults,
     ) !State {
         return .{
             .allocator = allocator,
             .io = io,
             .steam_root = if (steam_root) |root| try allocator.dupe(u8, root) else null,
             .preview_transaction_path = try allocator.dupe(u8, preview_transaction_path),
+            .monitor = monitor,
         };
     }
 
@@ -92,10 +114,40 @@ const State = struct {
             .{ pending.app_id, pending.achievement, cleared },
         );
     }
+
+    fn startMonitor(self: *State, params: Params) !void {
+        if (self.monitor_started) return;
+        if (params.interval_ms < 100) return error.IntervalTooSmall;
+        const context = try self.allocator.create(bridge.host.all_watchers.Context);
+        context.* = .{
+            .io = self.io,
+            .gse_roots = self.monitor.gse_roots,
+            .r2_roots = self.monitor.r2_roots,
+            .rune_roots = self.monitor.rune_roots,
+            .spool_root = self.monitor.spool_root,
+            .journal_path = if (params.journal_path) |path|
+                try self.allocator.dupe(u8, path)
+            else
+                self.monitor.journal_path,
+            .replay_guard_path = self.monitor.replay_guard_path,
+            .interval_ms = params.interval_ms,
+            .recover = params.recover,
+            .notifications = params.notifications,
+        };
+        const thread = try std.Thread.spawn(.{}, monitorWorker, .{context});
+        thread.detach();
+        self.monitor_started = true;
+    }
 };
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
-    var state = try State.init(allocator, io, options.steam_root, options.preview_transaction_path);
+    var state = try State.init(
+        allocator,
+        io,
+        options.steam_root,
+        options.preview_transaction_path,
+        options.monitor,
+    );
     defer state.deinit();
 
     const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", options.port);
@@ -155,6 +207,15 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
             .status = "ready",
             .protocol_version = protocol_version,
             .steam_session_scope = "request",
+            .monitoring = state.monitor_started,
+        });
+        return;
+    }
+    if (std.mem.eql(u8, request.method, "start_monitor")) {
+        try state.startMonitor(request.params);
+        try writeSuccess(allocator, writer, request.id, .{
+            .monitoring = state.monitor_started,
+            .interval_ms = request.params.interval_ms,
         });
         return;
     }
@@ -286,6 +347,74 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         });
         return;
     }
+    if (std.mem.eql(u8, request.method, "sync_achievement")) {
+        const app_id = request.params.app_id orelse return error.MissingAppId;
+        const wanted = request.params.achievement orelse return error.MissingAchievement;
+        const provider = request.params.provider orelse return error.MissingProvider;
+        if (std.mem.eql(u8, provider, "gse")) {
+            try verifyGseUnlock(state, allocator, app_id, wanted);
+        } else if (std.mem.eql(u8, provider, "rune")) {
+            try verifyRuneUnlock(state, allocator, app_id, wanted);
+        } else {
+            return error.UnsupportedSyncProvider;
+        }
+
+        var direct_error: ?[]const u8 = null;
+        if (state.connectSession(app_id)) |connected| {
+            var session = connected;
+            defer session.close();
+            if (bridge.steam.adapter.listAchievements(&session, allocator)) |achievement_list| {
+                var achievements = achievement_list;
+                defer achievements.deinit();
+                const achievement = findAchievement(achievements.items.items, wanted) orelse
+                    return error.AchievementNotFound;
+                if (bridge.steam.adapter.unlockAchievement(
+                    &session,
+                    allocator,
+                    state.io,
+                    achievement.api_name,
+                )) |result| {
+                    try writeSuccess(allocator, writer, request.id, .{
+                        .app_id = app_id,
+                        .achievement = achievement.api_name,
+                        .provider = provider,
+                        .route = "steam_abi",
+                        .result = @tagName(result),
+                        .server_acknowledged = true,
+                    });
+                    return;
+                } else |err| {
+                    direct_error = @errorName(err);
+                }
+            } else |err| {
+                direct_error = @errorName(err);
+            }
+        } else |err| {
+            direct_error = @errorName(err);
+        }
+
+        var local = try bridge.steam.live_sync.sync(allocator, state.io, .{
+            .app_id = app_id,
+            .api_name = wanted,
+            .unlock_time = request.params.timestamp orelse @intCast(unixNow(state.io)),
+            .steam_root = try state.getSteamRoot(),
+            .backup_root = state.monitor.backup_root,
+            .experimental_native_notification = request.params.native_toast,
+        });
+        defer local.deinit();
+        try writeSuccess(allocator, writer, request.id, .{
+            .app_id = app_id,
+            .achievement = wanted,
+            .provider = provider,
+            .route = "steam_local_cache",
+            .direct_error = direct_error,
+            .changed = local.changed,
+            .cache_confirmed = local.cache_confirmed,
+            .steam_confirmed = local.steam_confirmed,
+            .native_notification = @tagName(local.native_notification),
+        });
+        return;
+    }
     return error.UnknownMethod;
 }
 
@@ -379,6 +508,51 @@ fn gameRunning(game_dir: []const u8) !bool {
     return false;
 }
 
+fn verifyGseUnlock(state: *State, allocator: std.mem.Allocator, app_id: u32, api_name: []const u8) !void {
+    var candidates = try bridge.gse.discovery.discover(allocator, state.io, state.monitor.gse_roots);
+    defer candidates.deinit();
+    for (candidates.items.items) |candidate| {
+        if (candidate.app_id != app_id) continue;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(state.io, candidate.state_file, allocator, .limited(16 * 1024 * 1024));
+        defer allocator.free(bytes);
+        var snapshot = try bridge.gse.snapshot.parse(allocator, bytes);
+        defer snapshot.deinit();
+        const achievement = snapshot.achievements.get(api_name) orelse return error.GseAchievementNotFound;
+        if (!achievement.earned) return error.GseAchievementNotUnlocked;
+        return;
+    }
+    return error.GseAppNotFound;
+}
+
+fn verifyRuneUnlock(state: *State, allocator: std.mem.Allocator, app_id: u32, api_name: []const u8) !void {
+    var candidates = try bridge.providers.rune.discovery.discover(allocator, state.io, state.monitor.rune_roots);
+    defer candidates.deinit();
+    for (candidates.items.items) |candidate| {
+        if (candidate.app_id != app_id) continue;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(state.io, candidate.state_file, allocator, .limited(8 * 1024 * 1024));
+        defer allocator.free(bytes);
+        var snapshot = try bridge.providers.rune.snapshot.parse(allocator, bytes);
+        defer snapshot.deinit();
+        const achievement = snapshot.achievements.get(api_name) orelse return error.RuneAchievementNotFound;
+        if (!achievement.earned) return error.RuneAchievementNotUnlocked;
+        return;
+    }
+    return error.RuneAppNotFound;
+}
+
 fn unixNow(io: std.Io) i64 {
     return @intCast(@divTrunc(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+}
+
+fn monitorWorker(context: *const bridge.host.all_watchers.Context) void {
+    bridge.host.all_watchers.run(context) catch |err|
+        std.debug.print("[AchievementBridge] monitor_stopped=true error={s}\n", .{@errorName(err)});
+}
+
+test "support classification distinguishes native, full, and detected providers" {
+    try std.testing.expectEqualStrings("COMPLETO", classifySupport("gse", 100, 52));
+    try std.testing.expectEqualStrings("SEM CATÁLOGO", classifySupport("rune", 90, 0));
+    try std.testing.expectEqualStrings("SÓ DETECTA", classifySupport("ubisoft", 90, null));
+    try std.testing.expectEqualStrings("NATIVO", classifySupport("steam", 75, null));
+    try std.testing.expectEqualStrings("SEM SUPORTE", classifySupport("epic", 85, null));
 }

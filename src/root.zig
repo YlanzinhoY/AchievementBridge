@@ -12,6 +12,7 @@ pub const detector = struct {
 };
 pub const resolver = @import("resolver/provider_resolver.zig");
 pub const host = struct {
+    pub const all_watchers = @import("host/all_watchers.zig");
     pub const session_monitor = @import("host/session_monitor.zig");
 };
 pub const registry = struct {
