@@ -141,7 +141,7 @@ formato de releases necessário para atualizações futuras.
 Para gerar uma release local a partir dos fontes:
 
 ```powershell
-.\scripts\build-installer.ps1 -Version 0.1.10
+.\scripts\build-installer.ps1 -Version 0.1.11
 ```
 
 O script compila o núcleo Zig em `ReleaseSafe`, executa a suíte existente, compila o gateway Go, gera o ícone, empacota a CLI e grava o setup,
@@ -149,7 +149,7 @@ o pacote completo e o feed Velopack em `dist`. Para reconstruir com binários Zi
 limpar os artefatos de release anteriores:
 
 ```powershell
-.\scripts\build-installer.ps1 -Version 0.1.10 -SkipZigBuild -SkipGoBuild -CleanReleases
+.\scripts\build-installer.ps1 -Version 0.1.11 -SkipZigBuild -SkipGoBuild -CleanReleases
 ```
 
 As ferramentas de build ficam fixadas em `requirements-build.txt` e `.config/dotnet-tools.json`.
