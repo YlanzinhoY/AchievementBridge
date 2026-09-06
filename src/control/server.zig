@@ -239,10 +239,11 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         const steam_root = try state.getSteamRoot();
         var catalog = try bridge.detector.steam_install.discover(allocator, state.io, steam_root);
         defer catalog.deinit();
-        var rockstar_candidates = try bridge.providers.rockstar.discovery.discover(
+        var rockstar_candidates = try bridge.providers.rockstar.discovery.discoverWithApps(
             allocator,
             state.io,
             state.monitor.rockstar_roots,
+            catalog.apps.items,
         );
         defer rockstar_candidates.deinit();
         var games: std.ArrayList(GameSupport) = .empty;
@@ -562,7 +563,15 @@ fn verifyRuneUnlock(state: *State, allocator: std.mem.Allocator, app_id: u32, ap
 }
 
 fn verifyRockstarUnlock(state: *State, allocator: std.mem.Allocator, app_id: u32, api_name: []const u8) !void {
-    var candidates = try bridge.providers.rockstar.discovery.discover(allocator, state.io, state.monitor.rockstar_roots);
+    const steam_root = try state.getSteamRoot();
+    var catalog = try bridge.detector.steam_install.discover(allocator, state.io, steam_root);
+    defer catalog.deinit();
+    var candidates = try bridge.providers.rockstar.discovery.discoverWithApps(
+        allocator,
+        state.io,
+        state.monitor.rockstar_roots,
+        catalog.apps.items,
+    );
     defer candidates.deinit();
     var found_locked = false;
     for (candidates.items.items) |candidate| {

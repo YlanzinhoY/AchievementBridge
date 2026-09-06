@@ -7,6 +7,7 @@ const WindowsNotifier = @import("../../notifications/windows.zig").Notifier;
 const MetadataCatalog = @import("../../core/metadata.zig").Catalog;
 const steam_metadata = @import("../../steam/metadata.zig");
 const mapper = @import("../../core/mapper.zig");
+const steam_install = @import("../../detector/steam_install.zig");
 
 pub const Options = struct {
     roots: []const []const u8,
@@ -48,10 +49,24 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     defer metadata.deinit();
     var metadata_attempted = std.AutoHashMap(u32, void).init(allocator);
     defer metadata_attempted.deinit();
+    var detected_steam_root: ?[]u8 = null;
+    defer if (detected_steam_root) |root| allocator.free(root);
+    const steam_root = options.steam_root orelse root: {
+        detected_steam_root = steam_install.findSteamRoot(allocator, io) catch null;
+        break :root if (detected_steam_root) |root| root else null;
+    };
+    var steam_catalog: ?steam_install.Catalog = if (steam_root) |root|
+        steam_install.discover(allocator, io, root) catch null
+    else
+        null;
+    defer if (steam_catalog) |*catalog| catalog.deinit();
+    var resolved_options = options;
+    resolved_options.steam_root = steam_root;
 
     std.debug.print("[RockstarProvider] status=discovering source=social_club\n", .{});
     while (true) {
-        try discoverNewStates(allocator, io, options, &journal, &tracked, &notifier, &metadata, &metadata_attempted);
+        const apps = if (steam_catalog) |*catalog| catalog.apps.items else &.{};
+        try discoverNewStates(allocator, io, resolved_options, apps, &journal, &tracked, &notifier, &metadata, &metadata_attempted);
         for (tracked.items) |*state| try checkState(allocator, io, &journal, state, &notifier, &metadata);
         try std.Io.sleep(io, .fromMilliseconds(options.interval_ms), .awake);
     }
@@ -61,13 +76,14 @@ fn discoverNewStates(
     allocator: std.mem.Allocator,
     io: std.Io,
     options: Options,
+    apps: []const steam_install.InstalledApp,
     journal: *Journal,
     tracked: *std.ArrayList(TrackedState),
     notifier: *?WindowsNotifier,
     metadata: *MetadataCatalog,
     metadata_attempted: *std.AutoHashMap(u32, void),
 ) !void {
-    var candidates = try discovery.discover(allocator, io, options.roots);
+    var candidates = try discovery.discoverWithApps(allocator, io, options.roots, apps);
     defer candidates.deinit();
     var first_seen_apps = std.AutoHashMap(u32, void).init(allocator);
     defer first_seen_apps.deinit();

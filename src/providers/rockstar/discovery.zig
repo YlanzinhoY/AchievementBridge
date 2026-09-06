@@ -1,5 +1,6 @@
 const std = @import("std");
 const snapshot = @import("snapshot.zig");
+const steam_install = @import("../../detector/steam_install.zig");
 
 pub const Candidate = struct {
     app_id: u32,
@@ -30,13 +31,28 @@ const state_names = [_][]const u8{
 };
 
 pub fn discover(allocator: std.mem.Allocator, io: std.Io, roots: []const []const u8) !CandidateList {
+    return discoverWithApps(allocator, io, roots, &.{});
+}
+
+pub fn discoverWithApps(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    roots: []const []const u8,
+    apps: []const steam_install.InstalledApp,
+) !CandidateList {
     var result = CandidateList{ .allocator = allocator };
     errdefer result.deinit();
-    for (roots) |root| try scanRoot(allocator, io, root, &result);
+    for (roots) |root| try scanRoot(allocator, io, root, apps, &result);
     return result;
 }
 
-fn scanRoot(allocator: std.mem.Allocator, io: std.Io, root: []const u8, result: *CandidateList) !void {
+fn scanRoot(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    root: []const u8,
+    apps: []const steam_install.InstalledApp,
+    result: *CandidateList,
+) !void {
     var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch return;
     defer dir.close(io);
     var walker = try dir.walk(allocator);
@@ -49,7 +65,7 @@ fn scanRoot(allocator: std.mem.Allocator, io: std.Io, root: []const u8, result: 
         if (entry.kind != .file or !isStateName(entry.basename)) continue;
         const path = try std.fs.path.join(allocator, &.{ root, entry.path });
         defer allocator.free(path);
-        const app_id = inferAppId(path) orelse continue;
+        const app_id = inferAppIdWithApps(path, apps) orelse continue;
         if (!try isReadableState(allocator, io, path)) continue;
         try addCandidate(allocator, app_id, path, result);
     }
@@ -74,6 +90,35 @@ pub fn inferAppId(path: []const u8) ?u32 {
         if (titleAppId(component)) |app_id| return app_id;
     }
     return null;
+}
+
+pub fn inferAppIdWithApps(path: []const u8, apps: []const steam_install.InstalledApp) ?u32 {
+    if (inferAppId(path)) |known| return known;
+    var components = std.mem.tokenizeAny(u8, path, "\\/");
+    while (components.next()) |component| {
+        if (std.fmt.parseInt(u32, component, 10) catch null) |numeric| {
+            for (apps) |app| if (app.app_id == numeric) return numeric;
+        }
+        for (apps) |app| {
+            if (normalizedTitleEqual(component, app.name)) return app.app_id;
+            const install_name = std.fs.path.basename(std.mem.trimEnd(u8, app.install_dir, "\\/"));
+            if (normalizedTitleEqual(component, install_name)) return app.app_id;
+        }
+    }
+    return null;
+}
+
+fn normalizedTitleEqual(left: []const u8, right: []const u8) bool {
+    var left_index: usize = 0;
+    var right_index: usize = 0;
+    while (true) {
+        while (left_index < left.len and !std.ascii.isAlphanumeric(left[left_index])) left_index += 1;
+        while (right_index < right.len and !std.ascii.isAlphanumeric(right[right_index])) right_index += 1;
+        if (left_index == left.len or right_index == right.len) return left_index == left.len and right_index == right.len;
+        if (std.ascii.toLower(left[left_index]) != std.ascii.toLower(right[right_index])) return false;
+        left_index += 1;
+        right_index += 1;
+    }
 }
 
 fn titleAppId(title: []const u8) ?u32 {
@@ -112,6 +157,19 @@ test "infer Steam AppIDs from Rockstar profile paths" {
     try std.testing.expectEqual(@as(?u32, 3240220), inferAppId("C:/Users/Public/Documents/Socialclub/RUNE/GTAV Enhanced/101/achievements.json"));
     try std.testing.expectEqual(@as(?u32, 1174180), inferAppId("C:/Profiles/ABCD/Titles/RDR2/achievements.dat"));
     try std.testing.expectEqual(@as(?u32, null), inferAppId("C:/Profiles/Unknown Game/achievements.json"));
+}
+
+test "infer unknown Rockstar title from the installed Steam catalog" {
+    const apps = [_]steam_install.InstalledApp{.{
+        .app_id = 4_242_424,
+        .name = @constCast("Future Rockstar Game"),
+        .install_dir = @constCast("D:/SteamLibrary/steamapps/common/Future Rockstar Game"),
+        .library_root = @constCast("D:/SteamLibrary"),
+    }};
+    try std.testing.expectEqual(
+        @as(?u32, 4_242_424),
+        inferAppIdWithApps("C:/Profiles/RUNE/Future_Rockstar-Game/101/achievements.json", &apps),
+    );
 }
 
 test "discover only readable Rockstar achievement state" {

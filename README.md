@@ -109,8 +109,9 @@ Para opcionalmente aguardar um jogo abrir antes da transação:
 
 O detector reconhece instalações Rockstar oficiais e compatíveis, incluindo jogos com
 `socialclub.dll`, `title.rgl`, `socialclub_emu.ini` ou `RUNE64.dll`. O provider procura estados locais
-de conquistas nos perfis do Social Club e nos diretórios públicos usados por emuladores, associa os
-títulos conhecidos ao AppID Steam e só emite uma conquista após reler um campo explícito de
+de conquistas nos perfis do Social Club e nos diretórios públicos usados por emuladores. A associação
+ao AppID compara dinamicamente o título e a pasta do perfil com toda a biblioteca Steam instalada;
+aliases conhecidos existem apenas como fallback. O provider só emite uma conquista após reler um campo explícito de
 desbloqueio em JSON ou INI.
 
 O catálogo, os nomes e as imagens continuam vindo da Steam. Se o runtime for detectado, mas o perfil
