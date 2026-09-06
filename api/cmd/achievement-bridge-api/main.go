@@ -72,6 +72,7 @@ func main() {
 	coreAddress := flag.String("core-address", envOr("ACHIEVEMENT_BRIDGE_CORE_ADDRESS", defaultCoreAddress), "loopback Zig core address")
 	coreExecutable := flag.String("core", os.Getenv("ACHIEVEMENT_BRIDGE_PATH"), "path to achievement-bridge executable")
 	steamRoot := flag.String("steam-root", os.Getenv("STEAM_ROOT"), "optional Steam installation path")
+	parentPID := flag.Int("parent-pid", 0, "optional UI process whose exit stops this API")
 	flag.Parse()
 
 	if err := requireLoopback(*apiAddress); err != nil {
@@ -123,6 +124,14 @@ func main() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			_ = server.Shutdown(ctx)
+		}()
+	}
+	if *parentPID > 0 {
+		go func() {
+			if err := waitForProcessExit(*parentPID); err != nil {
+				log.Printf("parent process watcher stopped: %v", err)
+			}
+			app.shutdown()
 		}()
 	}
 	shutdownContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

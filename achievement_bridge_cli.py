@@ -143,9 +143,7 @@ class BridgeApiClient:
                 pass
 
             api = find_api(self.bridge)
-            arguments = [str(api), "--core", str(self.bridge)]
-            if self.steam_root:
-                arguments += ["--steam-root", self.steam_root]
+            arguments = api_start_arguments(api, self.bridge, self.steam_root)
             log_path = Path(default_api_log_path())
             log_path.parent.mkdir(parents=True, exist_ok=True)
             creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -254,6 +252,19 @@ def find_api(bridge: Path) -> Path:
     raise FileNotFoundError(
         "achievement-bridge-api.exe não encontrada; execute o build do gateway Go"
     )
+
+
+def api_start_arguments(api: Path, bridge: Path, steam_root: str | None) -> list[str]:
+    arguments = [
+        str(api),
+        "--core",
+        str(bridge),
+        "--parent-pid",
+        str(os.getpid()),
+    ]
+    if steam_root:
+        arguments += ["--steam-root", steam_root]
+    return arguments
 
 
 def api_client(bridge: Path, steam_root: str | None) -> BridgeApiClient:
