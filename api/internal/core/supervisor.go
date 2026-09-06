@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/YlanzinhoY/AchievementBridge/api/internal/events"
 )
 
 type Supervisor struct {
@@ -19,20 +21,27 @@ type Supervisor struct {
 	steamRoot  string
 	stdout     io.Writer
 	stderr     io.Writer
+	events     *events.Broker
 
 	mu    sync.Mutex
 	owned *exec.Cmd
 }
 
 func NewSupervisor(client *Client, executable, address, steamRoot string) *Supervisor {
+	broker := events.NewBroker(500)
 	return &Supervisor{
 		client:     client,
 		executable: executable,
 		address:    address,
 		steamRoot:  steamRoot,
-		stdout:     os.Stdout,
-		stderr:     os.Stderr,
+		stdout:     io.MultiWriter(os.Stdout, events.NewLineWriter(broker.Publish)),
+		stderr:     io.MultiWriter(os.Stderr, events.NewLineWriter(broker.Publish)),
+		events:     broker,
 	}
+}
+
+func (s *Supervisor) Events() *events.Broker {
+	return s.events
 }
 
 func (s *Supervisor) Ensure(ctx context.Context) error {
@@ -81,16 +90,12 @@ func (s *Supervisor) Ensure(ctx context.Context) error {
 }
 
 func (s *Supervisor) awaitReady(ctx context.Context) error {
-	deadline := time.NewTimer(10 * time.Second)
-	defer deadline.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-deadline.C:
-			return fmt.Errorf("Zig core did not become ready at %s", s.address)
 		case <-ticker.C:
 			probeContext, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 			err := s.client.Call(probeContext, "health", struct{}{}, nil)

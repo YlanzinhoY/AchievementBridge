@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -23,11 +24,13 @@ import (
 const (
 	defaultAPIAddress  = "127.0.0.1:47650"
 	defaultCoreAddress = "127.0.0.1:47651"
+	coreStartupTimeout = 3 * time.Minute
 )
 
 type application struct {
 	core       *core.Client
 	supervisor *core.Supervisor
+	shutdown   func()
 }
 
 type achievement struct {
@@ -87,7 +90,9 @@ func main() {
 
 	coreClient := core.NewClient(*coreAddress)
 	supervisor := core.NewSupervisor(coreClient, *coreExecutable, *coreAddress, *steamRoot)
-	startupContext, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	// A pending preview recovery can legitimately wait through Steam's
+	// StoreStats rate limit before the core begins accepting requests.
+	startupContext, cancel := context.WithTimeout(context.Background(), coreStartupTimeout)
 	if err := supervisor.Ensure(startupContext); err != nil {
 		cancel()
 		log.Fatal(err)
@@ -102,12 +107,23 @@ func main() {
 	mux.HandleFunc("GET /v1/games/{app_id}/achievements", app.listAchievements)
 	mux.HandleFunc("POST /v1/achievement-previews", app.previewAchievement)
 	mux.HandleFunc("POST /v1/achievement-previews/rollback", app.rollbackAchievementPreview)
+	mux.HandleFunc("POST /v1/achievement-syncs", app.syncAchievement)
+	mux.HandleFunc("POST /v1/monitor/start", app.startMonitor)
+	mux.HandleFunc("GET /v1/monitor/events", app.monitorEvents)
+	mux.HandleFunc("POST /v1/shutdown", app.shutdownAPI)
 
 	server := &http.Server{
 		Addr:              *apiAddress,
 		Handler:           requestLogger(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
+	}
+	app.shutdown = func() {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = server.Shutdown(ctx)
+		}()
 	}
 	shutdownContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -231,6 +247,146 @@ func (a *application) rollbackAchievementPreview(writer http.ResponseWriter, req
 		return
 	}
 	writeJSON(writer, http.StatusOK, result)
+}
+
+func (a *application) syncAchievement(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		AppID       uint32  `json:"app_id"`
+		Achievement string  `json:"achievement"`
+		Provider    string  `json:"provider"`
+		Timestamp   *uint32 `json:"timestamp,omitempty"`
+		NativeToast bool    `json:"native_toast"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 64*1024))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	input.Achievement = strings.TrimSpace(input.Achievement)
+	input.Provider = strings.ToLower(strings.TrimSpace(input.Provider))
+	if input.AppID == 0 || input.Achievement == "" || input.Provider == "" {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "app_id, achievement and provider are required")
+		return
+	}
+	params := map[string]any{
+		"app_id":       input.AppID,
+		"achievement":  input.Achievement,
+		"provider":     input.Provider,
+		"native_toast": input.NativeToast,
+	}
+	if input.Timestamp != nil {
+		params["timestamp"] = *input.Timestamp
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Minute)
+	defer cancel()
+	var result map[string]any
+	if err := a.core.Call(ctx, "sync_achievement", params, &result); err != nil {
+		writeCoreError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (a *application) startMonitor(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		IntervalMS    uint32  `json:"interval_ms"`
+		JournalPath   *string `json:"journal_path,omitempty"`
+		Recover       *bool   `json:"recover,omitempty"`
+		Notifications *bool   `json:"notifications,omitempty"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 64*1024))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil && !errors.Is(err, io.EOF) {
+		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if input.IntervalMS == 0 {
+		input.IntervalMS = 500
+	}
+	if input.IntervalMS < 100 {
+		writeError(writer, http.StatusBadRequest, "invalid_interval", "interval_ms must be at least 100")
+		return
+	}
+	params := map[string]any{
+		"interval_ms":   input.IntervalMS,
+		"recover":       true,
+		"notifications": true,
+	}
+	if input.JournalPath != nil {
+		params["journal_path"] = *input.JournalPath
+	}
+	if input.Recover != nil {
+		params["recover"] = *input.Recover
+	}
+	if input.Notifications != nil {
+		params["notifications"] = *input.Notifications
+	}
+	// A new UI monitoring session must not replay achievements from an older
+	// session. Lines emitted between this reset and the SSE subscription remain
+	// buffered, so startup events cannot be missed.
+	a.supervisor.Events().ClearHistory()
+	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	var result map[string]any
+	if err := a.core.Call(ctx, "start_monitor", params, &result); err != nil {
+		writeCoreError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (a *application) monitorEvents(writer http.ResponseWriter, request *http.Request) {
+	flusher, ok := writer.(http.Flusher)
+	if !ok {
+		writeError(writer, http.StatusInternalServerError, "stream_unsupported", "streaming is not supported")
+		return
+	}
+	writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	writer.Header().Set("Cache-Control", "no-cache")
+	writer.Header().Set("Connection", "keep-alive")
+	stream, history, unsubscribe := a.supervisor.Events().Subscribe()
+	defer unsubscribe()
+	writeEvent := func(line string) bool {
+		data, err := json.Marshal(line)
+		if err != nil {
+			return false
+		}
+		if _, err := fmt.Fprintf(writer, "data: %s\n\n", data); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	for _, line := range history {
+		if !writeEvent(line) {
+			return
+		}
+	}
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-request.Context().Done():
+			return
+		case line, open := <-stream:
+			if !open || !writeEvent(line) {
+				return
+			}
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(writer, ": heartbeat\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func (a *application) shutdownAPI(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "shutting_down"})
+	if a.shutdown != nil {
+		a.shutdown()
+	}
 }
 
 func writeCoreError(writer http.ResponseWriter, err error) {
