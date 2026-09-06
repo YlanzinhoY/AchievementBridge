@@ -528,6 +528,7 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         }
 
         var direct_error: ?[]const u8 = null;
+        var canonical_achievement = wanted;
         if (state.connectSession(app_id)) |connected| {
             var session = connected;
             defer session.close();
@@ -536,6 +537,7 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
                 defer achievements.deinit();
                 const achievement = findAchievement(achievements.items.items, wanted) orelse
                     return error.AchievementNotFound;
+                canonical_achievement = try allocator.dupe(u8, achievement.api_name);
                 if (bridge.steam.adapter.unlockAchievement(
                     &session,
                     allocator,
@@ -563,7 +565,7 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
 
         var local = try bridge.steam.live_sync.sync(allocator, state.io, .{
             .app_id = app_id,
-            .api_name = wanted,
+            .api_name = canonical_achievement,
             .unlock_time = request.params.timestamp orelse @intCast(unixNow(state.io)),
             .steam_root = try state.getSteamRoot(),
             .backup_root = state.monitor.backup_root,
@@ -572,7 +574,7 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         defer local.deinit();
         try writeSuccess(allocator, writer, request.id, .{
             .app_id = app_id,
-            .achievement = wanted,
+            .achievement = canonical_achievement,
             .provider = provider,
             .route = "steam_local_cache",
             .direct_error = direct_error,
@@ -825,4 +827,22 @@ test "support classification distinguishes native, full, and detected providers"
     try std.testing.expectEqualStrings("SÓ DETECTA", classifySupport("ubisoft", 90, null, true));
     try std.testing.expectEqualStrings("NATIVO", classifySupport("steam", 75, null, true));
     try std.testing.expectEqualStrings("SEM SUPORTE", classifySupport("epic", 85, null, true));
+}
+
+test "provider objective resolves to canonical Steam API name" {
+    const achievements = [_]bridge.steam.user_stats.AchievementState{
+        .{
+            .api_name = @constCast("Outlaws_Ach_19"),
+            .name = @constCast("The heavier they fall"),
+            .description = @constCast(""),
+            .icon = @constCast(""),
+            .icon_gray = @constCast(""),
+            .unlocked = false,
+            .unlock_time = 0,
+            .hidden = false,
+            .global_percent = null,
+        },
+    };
+    const achievement = findAchievement(&achievements, "19") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("Outlaws_Ach_19", achievement.api_name);
 }
