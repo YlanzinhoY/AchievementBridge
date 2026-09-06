@@ -21,6 +21,17 @@ const Params = struct {
     achievement: ?[]const u8 = null,
     duration_ms: ?u32 = null,
     wait_for_game_dir: ?[]const u8 = null,
+    verify_schema: bool = false,
+};
+
+const GameSupport = struct {
+    app_id: u32,
+    name: []const u8,
+    directory: []const u8,
+    provider: []const u8,
+    confidence: u8,
+    achievement_count: ?usize,
+    status: []const u8,
 };
 
 const State = struct {
@@ -134,6 +145,51 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         });
         return;
     }
+    if (std.mem.eql(u8, request.method, "inspect_games")) {
+        const steam_root = try state.getSteamRoot();
+        var catalog = try bridge.detector.steam_install.discover(allocator, state.io, steam_root);
+        defer catalog.deinit();
+        var games: std.ArrayList(GameSupport) = .empty;
+        defer games.deinit(allocator);
+        for (catalog.apps.items) |app| {
+            var provider: []const u8 = "none";
+            var confidence: u8 = 0;
+            if (bridge.detector.runtime.detect(allocator, state.io, app.install_dir)) |detected| {
+                var report = detected;
+                defer report.deinit();
+                const candidates = try bridge.resolver.resolve(allocator, &report);
+                defer allocator.free(candidates);
+                if (selectProvider(candidates)) |selected| {
+                    provider = @tagName(selected.provider);
+                    confidence = selected.confidence;
+                }
+            } else |_| {}
+
+            var achievement_count: ?usize = null;
+            if (request.params.verify_schema and supportsStandaloneSync(provider, confidence)) {
+                if (state.getSession(app.app_id)) |session| {
+                    if (session.client.loadCurrentUserStats(state.io, app.app_id, 10_000)) |_| {
+                        if (bridge.steam.adapter.listAchievements(session, allocator)) |achievement_list| {
+                            var achievements = achievement_list;
+                            achievement_count = achievements.items.items.len;
+                            achievements.deinit();
+                        } else |_| {}
+                    } else |_| {}
+                } else |_| {}
+            }
+            try games.append(allocator, .{
+                .app_id = app.app_id,
+                .name = app.name,
+                .directory = app.install_dir,
+                .provider = provider,
+                .confidence = confidence,
+                .achievement_count = achievement_count,
+                .status = classifySupport(provider, confidence, achievement_count),
+            });
+        }
+        try writeSuccess(allocator, writer, request.id, .{ .games = games.items });
+        return;
+    }
     if (std.mem.eql(u8, request.method, "preview_achievement")) {
         const app_id = request.params.app_id orelse return error.MissingAppId;
         const wanted = request.params.achievement orelse return error.MissingAchievement;
@@ -212,6 +268,33 @@ fn numericSuffix(api_name: []const u8) ?[]const u8 {
     while (start > 0 and std.ascii.isDigit(api_name[start - 1])) start -= 1;
     if (start == api_name.len) return null;
     return api_name[start..];
+}
+
+fn selectProvider(candidates: []const bridge.resolver.Candidate) ?bridge.resolver.Candidate {
+    const priority = [_]bridge.event.ProviderKind{
+        .gse, .rune, .uplay_r2, .ubisoft, .steam, .epic, .gog, .ea, .xbox,
+    };
+    for (priority) |wanted| {
+        for (candidates) |candidate| if (candidate.provider == wanted) return candidate;
+    }
+    return null;
+}
+
+fn supportsStandaloneSync(provider: []const u8, confidence: u8) bool {
+    return confidence >= 60 and
+        (std.mem.eql(u8, provider, "gse") or std.mem.eql(u8, provider, "rune"));
+}
+
+fn classifySupport(provider: []const u8, confidence: u8, achievement_count: ?usize) []const u8 {
+    if (supportsStandaloneSync(provider, confidence)) {
+        if (achievement_count) |count| if (count == 0) return "SEM CATÁLOGO";
+        return "COMPLETO";
+    }
+    if (confidence >= 60 and
+        (std.mem.eql(u8, provider, "ubisoft") or std.mem.eql(u8, provider, "uplay_r2")))
+        return "SÓ DETECTA";
+    if (confidence >= 50 and std.mem.eql(u8, provider, "steam")) return "NATIVO";
+    return "SEM SUPORTE";
 }
 
 fn gameRunning(game_dir: []const u8) !bool {

@@ -47,6 +47,16 @@ type achievementCatalog struct {
 	Achievements []achievement `json:"achievements"`
 }
 
+type gameSupport struct {
+	AppID            uint32  `json:"app_id"`
+	Name             string  `json:"name"`
+	Directory        string  `json:"directory"`
+	Provider         string  `json:"provider"`
+	Confidence       uint8   `json:"confidence"`
+	AchievementCount *uint64 `json:"achievement_count"`
+	Status           string  `json:"status"`
+}
+
 type previewRequest struct {
 	AppID          uint32  `json:"app_id"`
 	Achievement    string  `json:"achievement"`
@@ -88,6 +98,7 @@ func main() {
 	app := &application{core: coreClient, supervisor: supervisor}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", app.health)
+	mux.HandleFunc("GET /v1/games", app.listGames)
 	mux.HandleFunc("GET /v1/games/{app_id}/achievements", app.listAchievements)
 	mux.HandleFunc("POST /v1/achievement-previews", app.previewAchievement)
 
@@ -110,6 +121,24 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+func (a *application) listGames(writer http.ResponseWriter, request *http.Request) {
+	verifySchema, err := strconv.ParseBool(request.URL.Query().Get("verify_schema"))
+	if err != nil && request.URL.Query().Has("verify_schema") {
+		writeError(writer, http.StatusBadRequest, "invalid_verify_schema", "verify_schema must be true or false")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Minute)
+	defer cancel()
+	var result struct {
+		Games []gameSupport `json:"games"`
+	}
+	if err := a.core.Call(ctx, "inspect_games", map[string]any{"verify_schema": verifySchema}, &result); err != nil {
+		writeCoreError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
 }
 
 func (a *application) health(writer http.ResponseWriter, request *http.Request) {
@@ -163,8 +192,12 @@ func (a *application) previewAchievement(writer http.ResponseWriter, request *ht
 		writeError(writer, http.StatusBadRequest, "invalid_duration", "duration_ms must be between 1000 and 60000")
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), 5*time.Minute)
-	defer cancel()
+	ctx := request.Context()
+	if input.WaitForGameDir == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+	}
 	var result map[string]any
 	if err := a.core.Call(ctx, "preview_achievement", input, &result); err != nil {
 		writeCoreError(writer, err)
