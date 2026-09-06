@@ -320,6 +320,16 @@ O provider lê `%LOCALAPPDATA%\Ubisoft Game Launcher\spool`; não acessa a conta
 
 ## Uplay R2-compatible
 
+Preparar automaticamente a conexão usando o catálogo oficial já carregado pela Steam:
+
+```powershell
+python achievement_bridge_cli.py prepare-support 2842040
+```
+
+Esse fluxo gera `achievements_schema.json`, habilita o log/estado local e cria um manifesto em `%LOCALAPPDATA%\AchievementBridge\support\games\<SteamAppID>\support.json`. O manifesto registra separadamente as capacidades de detectar, monitorar, mapear, sincronizar e exibir popup. A CLI só mostra `COMPLETO` quando o ProductID do provider, o `achievements.json`, o catálogo e o mapeamento Steam estão presentes; antes da primeira inicialização do jogo, mostra `AGUARDA DADOS`.
+
+O ProductID é aprendido dinamicamente da inicialização real do loader e associado ao Steam AppID pelo manifesto. Portanto, a solução não mantém uma tabela fixa por jogo. API names com sufixo numérico, como `Outlaws_Ach_19` e `ACObsidian_Ach_30`, são convertidos para o objetivo local correspondente e novamente validados antes de qualquer sincronização Steam.
+
 Diagnosticar uma instalação sem modificá-la:
 
 ```powershell
