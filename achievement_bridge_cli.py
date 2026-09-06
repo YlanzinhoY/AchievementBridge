@@ -35,8 +35,8 @@ except ImportError:  # pragma: no cover - the packaged application is Windows-on
     winreg = None  # type: ignore[assignment]
 
 
-SUPPORTED_SYNC_PROVIDERS = ("gse", "rune", "rockstar")
-MONITORED_PROVIDERS = ("ubisoft", "uplay_r2")
+SUPPORTED_SYNC_PROVIDERS = ("gse", "rune", "rockstar", "uplay_r2")
+MONITORED_PROVIDERS = ("ubisoft",)
 PROVIDER_PRIORITY = ("gse", "rune", "rockstar", "uplay_r2", "ubisoft", "steam", "epic", "gog", "ea", "xbox")
 DEFAULT_NOTIFICATION_PREVIEW_MS = 7000
 MIN_NOTIFICATION_PREVIEW_MS = 1000
@@ -659,6 +659,15 @@ def read_available_achievements(bridge: Path, app_id: int, steam_root: str | Non
     return achievements
 
 
+def prepare_game_support(bridge: Path, app_id: int, steam_root: str | None) -> dict[str, object]:
+    return api_client(bridge, steam_root).request(
+        "POST",
+        f"/v1/games/{app_id}/support",
+        {},
+        timeout=180,
+    )
+
+
 def inspect_installed_games(bridge: Path, steam_root: str | None, verify_schema: bool = True) -> list[SupportReport]:
     result = api_client(bridge, steam_root).request(
         "GET",
@@ -719,7 +728,7 @@ def print_game_table(reports: list[SupportReport]) -> None:
     console.print("[bold green]COMPLETO[/]  Bridge detecta e sincroniza com a Steam")
     console.print("[cyan]NATIVO[/]    O próprio jogo usa Steamworks; não precisa do Bridge")
     console.print("[yellow]SÓ DETECTA[/] O Bridge vê o evento, mas a CLI ainda não sincroniza sozinha")
-    console.print("[yellow]AGUARDA DADOS[/] Rockstar detectado; aguardando um estado local de conquistas legível")
+    console.print("[yellow]AGUARDA DADOS[/] Integração preparada; abra o jogo para criar o estado de conquistas")
     console.print("[yellow]SEM CATÁLOGO[/] O provedor existe, mas a Steam não retornou conquistas")
     console.print("[red]SEM SUPORTE[/] Provedor de conquistas ainda não implementado")
 
@@ -1285,6 +1294,24 @@ def achievements_command(
     )
     achievements = exit_on_failure(lambda: read_available_achievements(bridge, app_id, options.steam_root))
     print_achievement_table(game, achievements)
+
+
+@app.command("prepare-support")
+def prepare_support_command(
+    context: typer.Context,
+    app_id: Annotated[int, typer.Argument(help="Steam AppID do jogo")],
+) -> None:
+    """Prepare e registre a conexão de conquistas de um jogo compatível."""
+    options = get_cli_options(context)
+    bridge = resolve_bridge(options.bridge)
+    result = exit_on_failure(lambda: prepare_game_support(bridge, app_id, options.steam_root))
+    status = str(result.get("status", "AGUARDA DADOS"))
+    game = str(result.get("game", f"AppID {app_id}"))
+    count = result.get("achievement_count", "-")
+    message = f"{game}\n{count} conquistas conectadas\nStatus: {status}"
+    if status == "AGUARDA DADOS":
+        message += "\nAbra o jogo uma vez para o Bridge aprender o identificador do provedor."
+    console.print(Panel(message, title="[bold green]Suporte preparado[/]", border_style="green"))
 
 
 @app.command("simulate-popup")

@@ -107,6 +107,7 @@ func main() {
 	mux.HandleFunc("GET /v1/health", app.health)
 	mux.HandleFunc("GET /v1/games", app.listGames)
 	mux.HandleFunc("GET /v1/games/{app_id}/achievements", app.listAchievements)
+	mux.HandleFunc("POST /v1/games/{app_id}/support", app.prepareGameSupport)
 	mux.HandleFunc("POST /v1/achievement-previews", app.previewAchievement)
 	mux.HandleFunc("POST /v1/achievement-previews/rollback", app.rollbackAchievementPreview)
 	mux.HandleFunc("POST /v1/achievement-syncs", app.syncAchievement)
@@ -292,6 +293,23 @@ func (a *application) syncAchievement(writer http.ResponseWriter, request *http.
 	defer cancel()
 	var result map[string]any
 	if err := a.core.Call(ctx, "sync_achievement", params, &result); err != nil {
+		writeCoreError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (a *application) prepareGameSupport(writer http.ResponseWriter, request *http.Request) {
+	appIDValue := strings.TrimSpace(request.PathValue("app_id"))
+	appID64, err := strconv.ParseUint(appIDValue, 10, 32)
+	if err != nil || appID64 == 0 {
+		writeError(writer, http.StatusBadRequest, "invalid_app_id", "app_id must be a positive integer")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Minute)
+	defer cancel()
+	var result map[string]any
+	if err := a.core.Call(ctx, "prepare_game_support", map[string]any{"app_id": uint32(appID64)}, &result); err != nil {
 		writeCoreError(writer, err)
 		return
 	}
