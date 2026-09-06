@@ -46,6 +46,7 @@ pub fn main(init: std.process.Init) !void {
         const journal_path = try defaultJournalPath(allocator, init.environ_map);
         const replay_guard_path = try defaultR2ReplayGuardPath(allocator, init.environ_map);
         const backup_root = try defaultBackupRoot(allocator, init.environ_map);
+        const support_root = try std.fs.path.join(allocator, &.{ localappdata, "AchievementBridge", "support" });
         const gse_roots = &[_][]const u8{
             try std.fs.path.join(allocator, &.{ appdata, "GSE Saves" }),
             try std.fs.path.join(allocator, &.{ appdata, "Goldberg SteamEmu Saves" }),
@@ -70,6 +71,7 @@ pub fn main(init: std.process.Init) !void {
                 .journal_path = journal_path,
                 .replay_guard_path = replay_guard_path,
                 .backup_root = backup_root,
+                .support_root = support_root,
             },
         });
         return;
@@ -287,6 +289,7 @@ pub fn main(init: std.process.Init) !void {
         const localappdata = init.environ_map.get("LOCALAPPDATA") orelse return error.MissingLocalAppData;
         const journal_path = cli.journal_path orelse try defaultJournalPath(allocator, init.environ_map);
         const replay_guard_path = try defaultR2ReplayGuardPath(allocator, init.environ_map);
+        const support_root = try std.fs.path.join(allocator, &.{ localappdata, "AchievementBridge", "support" });
         const gse_roots = &[_][]const u8{
             try std.fs.path.join(allocator, &.{ appdata, "GSE Saves" }),
             try std.fs.path.join(allocator, &.{ appdata, "Goldberg SteamEmu Saves" }),
@@ -307,6 +310,7 @@ pub fn main(init: std.process.Init) !void {
             .spool_root = spool_root,
             .journal_path = journal_path,
             .replay_guard_path = replay_guard_path,
+            .support_root = support_root,
             .interval_ms = cli.interval_ms,
             .recover = cli.recover,
             .notifications = cli.notifications,
@@ -511,6 +515,8 @@ pub fn main(init: std.process.Init) !void {
         } else {
             const journal_path = cli.journal_path orelse try defaultJournalPath(allocator, init.environ_map);
             const replay_guard_path = try defaultR2ReplayGuardPath(allocator, init.environ_map);
+            const localappdata = init.environ_map.get("LOCALAPPDATA") orelse return error.MissingLocalAppData;
+            const support_root = try std.fs.path.join(allocator, &.{ localappdata, "AchievementBridge", "support" });
             const mapping_root: ?[]const u8 = if (cli.app_id != null)
                 if (cli.steam_root) |root| root else bridge.detector.steam_install.findSteamRoot(allocator, init.io) catch null
             else
@@ -524,6 +530,7 @@ pub fn main(init: std.process.Init) !void {
                 .steam_app_id = cli.app_id,
                 .steam_root = mapping_root,
                 .replay_guard_path = replay_guard_path,
+                .support_root = support_root,
             });
         }
         return;

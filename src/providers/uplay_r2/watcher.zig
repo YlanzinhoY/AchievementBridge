@@ -8,6 +8,7 @@ const MetadataCatalog = @import("../../core/metadata.zig").Catalog;
 const steam_metadata = @import("../../steam/metadata.zig");
 const mapper = @import("../../core/mapper.zig");
 const replay_guard = @import("replay_guard.zig");
+const game_manifest = @import("../../support/game_manifest.zig");
 
 pub const Options = struct {
     roots: []const []const u8,
@@ -18,6 +19,7 @@ pub const Options = struct {
     steam_app_id: ?u32 = null,
     steam_root: ?[]const u8 = null,
     replay_guard_path: ?[]const u8 = null,
+    support_root: ?[]const u8 = null,
 };
 
 const Tracked = struct {
@@ -77,7 +79,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 if (item.mtime_ns == stat.mtime.nanoseconds and item.size == stat.size) continue;
                 var current = readSnapshot(allocator, io, candidate.state_file) catch continue;
                 errdefer current.deinit();
-                try emitNew(allocator, io, &journal, &notifier, &guard, candidate.app_id, candidate.state_file, &item.state, &current, false, options.steam_app_id, &metadata);
+                try emitNew(allocator, io, &journal, &notifier, &guard, candidate.app_id, candidate.state_file, &item.state, &current, false, options.steam_app_id, options.support_root, &metadata);
                 item.state.deinit();
                 item.state = current;
                 item.mtime_ns = stat.mtime.nanoseconds;
@@ -93,7 +95,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             } else if (options.recover) {
                 var empty = snapshot.Snapshot.init(allocator);
                 defer empty.deinit();
-                try emitNew(allocator, io, &journal, &notifier, &guard, candidate.app_id, candidate.state_file, &empty, &current, true, options.steam_app_id, &metadata);
+                try emitNew(allocator, io, &journal, &notifier, &guard, candidate.app_id, candidate.state_file, &empty, &current, true, options.steam_app_id, options.support_root, &metadata);
             }
             try tracked.append(allocator, .{
                 .product_id = candidate.app_id,
@@ -108,7 +110,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     }
 }
 
-fn emitNew(allocator: std.mem.Allocator, io: std.Io, journal: *Journal, notifier: *?WindowsNotifier, guard: *?replay_guard.Guard, product_id: u32, state_path: []const u8, before: *const snapshot.Snapshot, after: *snapshot.Snapshot, recovered: bool, steam_app_id: ?u32, metadata: *const MetadataCatalog) !void {
+fn emitNew(allocator: std.mem.Allocator, io: std.Io, journal: *Journal, notifier: *?WindowsNotifier, guard: *?replay_guard.Guard, product_id: u32, state_path: []const u8, before: *const snapshot.Snapshot, after: *snapshot.Snapshot, recovered: bool, configured_steam_app_id: ?u32, support_root: ?[]const u8, metadata: *const MetadataCatalog) !void {
+    const steam_app_id = configured_steam_app_id orelse if (support_root) |root|
+        try game_manifest.resolveSteamAppId(allocator, io, root, "uplay_r2", product_id)
+    else
+        null;
     var iterator = after.achievements.iterator();
     while (iterator.next()) |entry| {
         if (!entry.value_ptr.earned) continue;
@@ -136,7 +142,9 @@ fn emitNew(allocator: std.mem.Allocator, io: std.Io, journal: *Journal, notifier
         const recorded = try journal.recordEvent(event);
         if (awaited_gameplay) if (guard.*) |*active| try active.complete();
         if (!recorded) continue;
-        std.debug.print("[AchievementBridge]\nprovider=uplay_r2\nproduct_id={d}\nachievement={s}\nstate=unlocked\ntimestamp={d}\nrecovered={}\n\n", .{ product_id, event.source_id, event.unlocked_at, event.recovered });
+        std.debug.print("[AchievementBridge]\nprovider=uplay_r2\n", .{});
+        if (steam_app_id) |canonical_app_id| std.debug.print("appid={d}\n", .{canonical_app_id});
+        std.debug.print("product_id={d}\nachievement={s}\nstate=unlocked\ntimestamp={d}\nrecovered={}\n\n", .{ product_id, event.source_id, event.unlocked_at, event.recovered });
         const mapping = if (steam_app_id) |canonical_app_id| mapper.mapNumericSuffix(event.source_id, canonical_app_id, metadata) else null;
         const details = if (mapping) |mapped| metadata.get(mapped.canonical_achievement_id) else null;
         if (mapping) |mapped| std.debug.print("[AchievementBridge] mapping={s}->{s} confidence={d}\n", .{ event.source_id, mapped.canonical_achievement_id, mapped.confidence });

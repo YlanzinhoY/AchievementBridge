@@ -1,4 +1,5 @@
 const std = @import("std");
+const AchievementState = @import("../../steam/user_stats.zig").AchievementState;
 
 pub const CatalogInfo = struct {
     achievement_count: usize,
@@ -107,6 +108,48 @@ pub fn enableAchievements(allocator: std.mem.Allocator, bytes: []const u8) ![]u8
     return output.toOwnedSlice(allocator);
 }
 
+/// Builds the Uplay R2 schema directly from Steam's authoritative catalog.
+/// The provider objective id is the numeric suffix of the Steam API name, so
+/// the result is reusable for catalogs such as `Outlaws_Ach_19` and
+/// `ACObsidian_Ach_30` without a game-specific table.
+pub fn renderSteamCatalog(allocator: std.mem.Allocator, achievements: []const AchievementState) ![]u8 {
+    if (achievements.len == 0 or achievements.len > 10_000) return error.InvalidAchievementCount;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const temp = arena.allocator();
+    var schema: std.json.ObjectMap = .empty;
+    for (achievements) |achievement| {
+        const id = numericSuffix(achievement.api_name) orelse return error.AchievementApiNameHasNoNumericSuffix;
+        if (schema.contains(id)) return error.DuplicateAchievementObjectiveId;
+        var item: std.json.ObjectMap = .empty;
+        try item.put(temp, "displayName", .{ .string = achievement.name });
+        try item.put(temp, "description", .{ .string = achievement.description });
+        try item.put(temp, "earned", .{ .integer = 0 });
+        try schema.put(temp, id, .{ .object = item });
+    }
+    return std.json.Stringify.valueAlloc(allocator, std.json.Value{ .object = schema }, .{ .whitespace = .indent_2 });
+}
+
+pub fn defaultConfig(allocator: std.mem.Allocator) ![]u8 {
+    return allocator.dupe(u8, "[Settings]\r\n" ++
+        "Language = en-US\r\n" ++
+        "Achievements = 1\r\n" ++
+        "Logging = 1\r\n" ++
+        "SaveType = 0\r\n" ++
+        "SavePath =\r\n" ++
+        "SaveExtension = .save\r\n");
+}
+
+fn numericSuffix(api_name: []const u8) ?[]const u8 {
+    var start = api_name.len;
+    while (start > 0 and std.ascii.isDigit(api_name[start - 1])) start -= 1;
+    if (start == api_name.len) return null;
+    const suffix = api_name[start..];
+    const value = std.fmt.parseInt(u32, suffix, 10) catch return null;
+    if (value == 0) return null;
+    return suffix;
+}
+
 fn object(value: std.json.Value) ?std.json.ObjectMap {
     return switch (value) {
         .object => |item| item,
@@ -170,4 +213,18 @@ test "enable achievements preserves CRLF and unrelated settings" {
     const enabled = try enableAchievements(std.testing.allocator, "[Settings]\r\nUsername = user\r\nAchievements = 0\r\nLogging = 0\r\n");
     defer std.testing.allocator.free(enabled);
     try std.testing.expectEqualStrings("[Settings]\r\nUsername = user\r\nAchievements = 1\r\nLogging = 0\r\n", enabled);
+}
+
+test "Steam catalog uses API numeric suffix as provider objective" {
+    const allocator = std.testing.allocator;
+    const achievements = [_]AchievementState{
+        .{ .api_name = @constCast("Outlaws_Ach_19"), .name = @constCast("Target"), .description = @constCast("Do it"), .icon = @constCast(""), .icon_gray = @constCast(""), .unlocked = false, .unlock_time = 0, .hidden = false, .global_percent = null },
+        .{ .api_name = @constCast("Outlaws_Ach_1"), .name = @constCast("First"), .description = @constCast("Begin"), .icon = @constCast(""), .icon_gray = @constCast(""), .unlocked = false, .unlock_time = 0, .hidden = false, .global_percent = null },
+    };
+    const rendered = try renderSteamCatalog(allocator, &achievements);
+    defer allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, rendered, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("Target", parsed.value.object.get("19").?.object.get("displayName").?.string);
+    try std.testing.expectEqualStrings("First", parsed.value.object.get("1").?.object.get("displayName").?.string);
 }
