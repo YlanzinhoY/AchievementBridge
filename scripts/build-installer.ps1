@@ -30,6 +30,13 @@ if (-not (Test-Path -LiteralPath $python)) {
 
 & $python -m pip install --disable-pip-version-check -r (Join-Path $repoRoot 'requirements-build.txt')
 if ($LASTEXITCODE -ne 0) { throw 'Could not install installer build dependencies.' }
+Push-Location $repoRoot
+try {
+    & $python -m unittest discover -s (Join-Path $repoRoot 'tests') -v
+    if ($LASTEXITCODE -ne 0) { throw 'Python CLI tests failed.' }
+} finally {
+    Pop-Location
+}
 
 if (-not $SkipZigBuild) {
     $zig = Get-Command zig -ErrorAction SilentlyContinue
@@ -50,6 +57,8 @@ if (-not $SkipGoBuild) {
     }
     Push-Location (Join-Path $repoRoot 'api')
     try {
+        & $go.Source test './...'
+        if ($LASTEXITCODE -ne 0) { throw 'Go API tests failed.' }
         & $go.Source build -o $gateway '.\cmd\achievement-bridge-api'
         if ($LASTEXITCODE -ne 0) { throw 'Go gateway release build failed.' }
     } finally {
