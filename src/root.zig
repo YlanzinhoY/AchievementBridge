@@ -35,6 +35,7 @@ pub const steam = struct {
     pub const binary_key_values = @import("steam/binary_key_values.zig");
     pub const client = @import("steam/client.zig");
     pub const cloud_ipc = @import("steam/cloud_ipc.zig");
+    pub const cloud_overlay = @import("steam/cloud_overlay.zig");
     pub const cloud_protocol = @import("steam/cloud_protocol.zig");
     pub const local_cache = @import("steam/local_cache.zig");
     pub const live_sync = @import("steam/live_sync.zig");
@@ -103,6 +104,7 @@ test {
     _ = steam.binary_key_values;
     _ = steam.client;
     _ = steam.cloud_ipc;
+    _ = steam.cloud_overlay;
     _ = steam.cloud_protocol;
     _ = steam.local_cache;
     _ = steam.live_sync;
