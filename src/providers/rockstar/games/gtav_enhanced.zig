@@ -411,6 +411,14 @@ pub fn steamAchievement(internal_id: usize) ?[]const u8 {
     };
 }
 
+pub fn internalAchievement(api_name: []const u8) ?usize {
+    for (1..maximum_internal_id + 1) |internal_id| {
+        const candidate = steamAchievement(internal_id) orelse continue;
+        if (std.ascii.eqlIgnoreCase(candidate, api_name)) return internal_id;
+    }
+    return null;
+}
+
 test "GTA V Enhanced maps every Social Club PC achievement" {
     var names = std.StringHashMap(void).init(std.testing.allocator);
     defer names.deinit();
@@ -418,6 +426,7 @@ test "GTA V Enhanced maps every Social Club PC achievement" {
         const api_name = steamAchievement(internal_id) orelse return error.MissingAchievementMapping;
         try std.testing.expect(!names.contains(api_name));
         try names.put(api_name, {});
+        try std.testing.expectEqual(internal_id, internalAchievement(api_name).?);
     }
     try std.testing.expectEqual(maximum_internal_id, names.count());
     try std.testing.expectEqualStrings("ACH00", steamAchievement(1).?);

@@ -563,6 +563,16 @@ fn verifyRuneUnlock(state: *State, allocator: std.mem.Allocator, app_id: u32, ap
 }
 
 fn verifyRockstarUnlock(state: *State, allocator: std.mem.Allocator, app_id: u32, api_name: []const u8) !void {
+    if (app_id == bridge.providers.rockstar.games.gtav_enhanced.app_id) {
+        const internal_id = bridge.providers.rockstar.games.gtav_enhanced.internalAchievement(api_name) orelse
+            return error.RockstarAchievementNotFound;
+        var monitor = bridge.providers.rockstar.games.gtav_enhanced.Monitor.init(allocator);
+        defer monitor.deinit();
+        const sample = (try monitor.sample()) orelse return error.RockstarGameNotRunning;
+        if (!sample.unlocked.isSet(internal_id)) return error.RockstarAchievementNotUnlocked;
+        return;
+    }
+
     const steam_root = try state.getSteamRoot();
     var catalog = try bridge.detector.steam_install.discover(allocator, state.io, steam_root);
     defer catalog.deinit();
