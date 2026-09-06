@@ -1,4 +1,5 @@
 const std = @import("std");
+const discovery = @import("../providers/gse/discovery.zig");
 
 pub const schema_version: u32 = 1;
 
@@ -127,6 +128,35 @@ pub fn findSourceState(
     return null;
 }
 
+/// Learns the provider identity created after support preparation. This lets a
+/// completed session be correlated even after the game exits. Ambiguous
+/// candidates are deliberately rejected instead of guessing.
+pub fn findRecentUnclaimedUplayProductId(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    support_root: []const u8,
+    roots: []const []const u8,
+    steam_app_id: u32,
+    prepared_at: i64,
+) !?u32 {
+    var candidates = try discovery.discover(allocator, io, roots);
+    defer candidates.deinit();
+    const prepared_ns = @as(i128, prepared_at) * std.time.ns_per_s;
+    var selected: ?u32 = null;
+    for (candidates.items.items) |candidate| {
+        const stat = std.Io.Dir.cwd().statFile(io, candidate.state_file, .{}) catch continue;
+        if (@as(i128, stat.mtime.nanoseconds) < prepared_ns) continue;
+        const owner = try resolveSteamAppId(allocator, io, support_root, "uplay_r2", candidate.app_id);
+        if (owner != null and owner.? != steam_app_id) continue;
+        if (selected) |existing| {
+            if (existing != candidate.app_id) return null;
+        } else {
+            selected = candidate.app_id;
+        }
+    }
+    return selected;
+}
+
 pub fn manifestPath(allocator: std.mem.Allocator, root: []const u8, app_id: u32) ![]u8 {
     const id = try std.fmt.allocPrint(allocator, "{d}", .{app_id});
     defer allocator.free(id);
@@ -189,4 +219,47 @@ test "support manifest round trips" {
     defer loaded.deinit();
     try std.testing.expectEqualStrings("uplay_r2", loaded.value().provider);
     try std.testing.expectEqual(@as(usize, 59), loaded.value().catalog_count);
+}
+
+test "recent Uplay state is associated without stealing another manifest" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+    defer allocator.free(root);
+    const support_root = try std.fs.path.join(allocator, &.{ root, "support" });
+    defer allocator.free(support_root);
+    const saves_root = try std.fs.path.join(allocator, &.{ root, "saves" });
+    defer allocator.free(saves_root);
+    for ([_][]const u8{ "66088", "64181" }) |product_id| {
+        const directory = try std.fs.path.join(allocator, &.{ saves_root, product_id });
+        defer allocator.free(directory);
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, directory);
+        const state_path = try std.fs.path.join(allocator, &.{ directory, "achievements.json" });
+        defer allocator.free(state_path);
+        var state_file = try std.Io.Dir.cwd().createFile(std.testing.io, state_path, .{});
+        try state_file.writePositionalAll(std.testing.io, "{}", 0);
+        state_file.close(std.testing.io);
+    }
+    const owner_path = try save(allocator, std.testing.io, support_root, .{
+        .steam_app_id = 3751950,
+        .game = "Black Flag",
+        .game_directory = root,
+        .provider = "uplay_r2",
+        .provider_product_id = 66088,
+        .mapping = "numeric_suffix",
+        .catalog_count = 49,
+        .prepared_at = 1,
+        .capabilities = .{ .detect = true, .monitor = true, .map_to_steam = true, .sync_to_steam = true, .popup = true },
+    });
+    defer allocator.free(owner_path);
+    const detected = try findRecentUnclaimedUplayProductId(
+        allocator,
+        std.testing.io,
+        support_root,
+        &.{saves_root},
+        2842040,
+        1,
+    );
+    try std.testing.expectEqual(@as(?u32, 64181), detected);
 }

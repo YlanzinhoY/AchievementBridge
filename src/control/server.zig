@@ -271,8 +271,17 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
                 const manifest = loaded.value();
                 const diagnostic = bridge.providers.uplay_r2.diagnostic.diagnose(allocator, state.io, app.install_dir) catch null;
                 if (diagnostic != null and diagnostic.?.ready() and manifest.catalog_count > 0) {
-                    const product_id = manifest.provider_product_id orelse
+                    var product_id = manifest.provider_product_id orelse
                         try bridge.game_support.readUplayProductId(allocator, state.io, app.install_dir);
+                    if (product_id == null) product_id =
+                        try bridge.game_support.findRecentUnclaimedUplayProductId(
+                            allocator,
+                            state.io,
+                            state.monitor.support_root,
+                            state.monitor.r2_roots,
+                            app.app_id,
+                            manifest.prepared_at,
+                        );
                     const source_state = if (product_id) |id|
                         try bridge.game_support.findSourceState(allocator, state.io, state.monitor.r2_roots, id)
                     else
@@ -380,7 +389,22 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         try backupFileOnce(allocator, state.io, config_path);
         try writeAtomic(state.io, config_path, enabled_config);
 
-        const product_id = try bridge.game_support.readUplayProductId(allocator, state.io, app.install_dir);
+        var correlation_since = unixNow(state.io);
+        if (try bridge.game_support.load(allocator, state.io, state.monitor.support_root, app_id)) |prior_value| {
+            var prior = prior_value;
+            correlation_since = prior.value().prepared_at;
+            prior.deinit();
+        }
+        var product_id = try bridge.game_support.readUplayProductId(allocator, state.io, app.install_dir);
+        if (product_id == null) product_id =
+            try bridge.game_support.findRecentUnclaimedUplayProductId(
+                allocator,
+                state.io,
+                state.monitor.support_root,
+                state.monitor.r2_roots,
+                app.app_id,
+                correlation_since,
+            );
         const source_state = if (product_id) |id|
             try bridge.game_support.findSourceState(allocator, state.io, state.monitor.r2_roots, id)
         else
