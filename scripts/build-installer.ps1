@@ -1,8 +1,9 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string] $Version = '0.1.0',
+    [string] $Version = '0.1.6',
     [switch] $SkipZigBuild,
+    [switch] $SkipGoBuild,
     [switch] $CleanReleases
 )
 
@@ -29,6 +30,13 @@ if (-not (Test-Path -LiteralPath $python)) {
 
 & $python -m pip install --disable-pip-version-check -r (Join-Path $repoRoot 'requirements-build.txt')
 if ($LASTEXITCODE -ne 0) { throw 'Could not install installer build dependencies.' }
+Push-Location $repoRoot
+try {
+    & $python -m unittest discover -s (Join-Path $repoRoot 'tests') -v
+    if ($LASTEXITCODE -ne 0) { throw 'Python CLI tests failed.' }
+} finally {
+    Pop-Location
+}
 
 if (-not $SkipZigBuild) {
     $zig = Get-Command zig -ErrorAction SilentlyContinue
@@ -41,9 +49,26 @@ if (-not $SkipZigBuild) {
     if ($LASTEXITCODE -ne 0) { throw 'Zig tests failed.' }
 }
 
+$gateway = Join-Path $repoRoot 'zig-out\bin\achievement-bridge-api.exe'
+if (-not $SkipGoBuild) {
+    $go = Get-Command go -ErrorAction SilentlyContinue
+    if ($null -eq $go) {
+        throw 'go.exe was not found. Install Go 1.26+ or use -SkipGoBuild with an existing gateway artifact.'
+    }
+    Push-Location (Join-Path $repoRoot 'api')
+    try {
+        & $go.Source test './...'
+        if ($LASTEXITCODE -ne 0) { throw 'Go API tests failed.' }
+        & $go.Source build -o $gateway '.\cmd\achievement-bridge-api'
+        if ($LASTEXITCODE -ne 0) { throw 'Go gateway release build failed.' }
+    } finally {
+        Pop-Location
+    }
+}
+
 $core = Join-Path $repoRoot 'zig-out\bin\achievement-bridge.exe'
 $cloud = Join-Path $repoRoot 'zig-out\bin\achievement-bridge-cloud.dll'
-foreach ($artifact in @($core, $cloud)) {
+foreach ($artifact in @($core, $cloud, $gateway)) {
     if (-not (Test-Path -LiteralPath $artifact)) { throw "Missing build artifact: $artifact" }
 }
 
@@ -71,6 +96,7 @@ if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
 $stage = Join-Path $pyInstallerDist.FullName 'AchievementBridge-CLI'
 Copy-Item -LiteralPath $core -Destination $stage
 Copy-Item -LiteralPath $cloud -Destination $stage
+Copy-Item -LiteralPath $gateway -Destination $stage
 Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $repoRoot 'REFERENCES.md') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination $stage

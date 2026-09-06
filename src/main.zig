@@ -1,7 +1,7 @@
 const std = @import("std");
 const bridge = @import("achievement_bridge");
 
-const Command = enum { scan, watch, watch_all, probe, games, sessions, host, catalog, local_record, steam_read, steam_unlock, steam_local_clear, steam_local_sync, steam_watch, gse_steam_sync, rune_scan, rune_watch, rune_steam_sync, ubisoft_scan, ubisoft_watch, uplay_r2_diagnose, uplay_r2_prepare, uplay_r2_arm_replay, uplay_r2_scan, uplay_r2_watch, notify_test, help };
+const Command = enum { serve, scan, watch, watch_all, probe, games, sessions, host, catalog, local_record, steam_read, steam_unlock, steam_local_clear, steam_local_sync, steam_watch, gse_steam_sync, rune_scan, rune_watch, rune_steam_sync, ubisoft_scan, ubisoft_watch, uplay_r2_diagnose, uplay_r2_prepare, uplay_r2_arm_replay, uplay_r2_scan, uplay_r2_watch, notify_test, help };
 
 const Cli = struct {
     command: Command = .watch,
@@ -26,6 +26,7 @@ const Cli = struct {
     confirm_local_write: bool = false,
     experimental_steam_notification: bool = false,
     local_store_path: ?[]const u8 = null,
+    port: u16 = 47_651,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -35,6 +36,42 @@ pub fn main(init: std.process.Init) !void {
 
     if (cli.command == .help) {
         printHelp();
+        return;
+    }
+
+    if (cli.command == .serve) {
+        const appdata = init.environ_map.get("APPDATA") orelse return error.MissingAppData;
+        const localappdata = init.environ_map.get("LOCALAPPDATA") orelse return error.MissingLocalAppData;
+        const preview_transaction_path = try defaultPreviewTransactionPath(allocator, init.environ_map);
+        const journal_path = try defaultJournalPath(allocator, init.environ_map);
+        const replay_guard_path = try defaultR2ReplayGuardPath(allocator, init.environ_map);
+        const backup_root = try defaultBackupRoot(allocator, init.environ_map);
+        const gse_roots = &[_][]const u8{
+            try std.fs.path.join(allocator, &.{ appdata, "GSE Saves" }),
+            try std.fs.path.join(allocator, &.{ appdata, "Goldberg SteamEmu Saves" }),
+        };
+        const r2_roots = &[_][]const u8{
+            try std.fs.path.join(allocator, &.{ appdata, "Goldberg UplayEmu Saves" }),
+        };
+        const rune_roots = &[_][]const u8{try defaultRuneRoot(allocator, init.environ_map)};
+        var rockstar_roots: std.ArrayList([]const u8) = .empty;
+        try addDefaultRockstarRoots(allocator, init.environ_map, &rockstar_roots);
+        const spool_root = try std.fs.path.join(allocator, &.{ localappdata, "Ubisoft Game Launcher", "spool" });
+        try bridge.control.server.run(allocator, init.io, .{
+            .port = cli.port,
+            .steam_root = cli.steam_root,
+            .preview_transaction_path = preview_transaction_path,
+            .monitor = .{
+                .gse_roots = gse_roots,
+                .r2_roots = r2_roots,
+                .rune_roots = rune_roots,
+                .rockstar_roots = rockstar_roots.items,
+                .spool_root = spool_root,
+                .journal_path = journal_path,
+                .replay_guard_path = replay_guard_path,
+                .backup_root = backup_root,
+            },
+        });
         return;
     }
 
@@ -258,12 +295,15 @@ pub fn main(init: std.process.Init) !void {
             try std.fs.path.join(allocator, &.{ appdata, "Goldberg UplayEmu Saves" }),
         };
         const rune_roots = &[_][]const u8{try defaultRuneRoot(allocator, init.environ_map)};
+        var rockstar_roots: std.ArrayList([]const u8) = .empty;
+        try addDefaultRockstarRoots(allocator, init.environ_map, &rockstar_roots);
         const spool_root = try std.fs.path.join(allocator, &.{ localappdata, "Ubisoft Game Launcher", "spool" });
-        const context = WatchAllContext{
+        const context = bridge.host.all_watchers.Context{
             .io = init.io,
             .gse_roots = gse_roots,
             .r2_roots = r2_roots,
             .rune_roots = rune_roots,
+            .rockstar_roots = rockstar_roots.items,
             .spool_root = spool_root,
             .journal_path = journal_path,
             .replay_guard_path = replay_guard_path,
@@ -271,7 +311,7 @@ pub fn main(init: std.process.Init) !void {
             .recover = cli.recover,
             .notifications = cli.notifications,
         };
-        try runAllWatchers(&context);
+        try bridge.host.all_watchers.run(&context);
         return;
     }
 
@@ -448,7 +488,16 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("[NotificationPreview] status=game_detected\n", .{});
         }
         const steam_root = if (cli.steam_root) |root| try allocator.dupe(u8, root) else try bridge.detector.steam_install.findSteamRoot(allocator, init.io);
-        try simulateSteamNotification(allocator, init.io, app_id, steam_root, wanted, cli.duration_ms);
+        const preview_transaction_path = try defaultPreviewTransactionPath(allocator, init.environ_map);
+        try simulateSteamNotification(
+            allocator,
+            init.io,
+            app_id,
+            steam_root,
+            wanted,
+            cli.duration_ms,
+            preview_transaction_path,
+        );
         return;
     }
 
@@ -518,6 +567,7 @@ pub fn main(init: std.process.Init) !void {
 
     switch (cli.command) {
         .scan => try bridge.gse.watcher.scan(allocator, init.io, cli.roots.items),
+        .serve => unreachable,
         .watch => try bridge.gse.watcher.run(allocator, init.io, .{
             .roots = cli.roots.items,
             .journal_path = journal_path,
@@ -555,129 +605,11 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-const WatchAllContext = struct {
-    io: std.Io,
-    gse_roots: []const []const u8,
-    r2_roots: []const []const u8,
-    rune_roots: []const []const u8,
-    spool_root: []const u8,
-    journal_path: []const u8,
-    replay_guard_path: []const u8,
-    interval_ms: u32,
-    recover: bool,
-    notifications: bool,
-};
-
-fn runAllWatchers(context: *const WatchAllContext) !void {
-    std.debug.print("[AchievementBridge] mode=watch-all providers=gse,rune,ubisoft,uplay_r2 sessions=enabled\n", .{});
-    const session_thread = try std.Thread.spawn(.{}, watchSessionWorker, .{context});
-    const gse_thread = try std.Thread.spawn(.{}, watchGseWorker, .{context});
-    const rune_thread = try std.Thread.spawn(.{}, watchRuneWorker, .{context});
-    const ubisoft_thread = try std.Thread.spawn(.{}, watchUbisoftWorker, .{context});
-    const r2_thread = try std.Thread.spawn(.{}, watchR2Worker, .{context});
-    session_thread.join();
-    gse_thread.join();
-    rune_thread.join();
-    ubisoft_thread.join();
-    r2_thread.join();
-}
-
-fn watchSessionWorker(context: *const WatchAllContext) void {
-    while (true) {
-        runSessionMonitor(context) catch |err| {
-            std.debug.print("[AchievementBridge] provider=sessions restart_reason={s}\n", .{@errorName(err)});
-            std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
-        };
-    }
-}
-
-fn runSessionMonitor(context: *const WatchAllContext) !void {
-    const allocator = std.heap.smp_allocator;
-    const steam_root = try bridge.detector.steam_install.findSteamRoot(allocator, context.io);
-    defer allocator.free(steam_root);
-    var catalog = try bridge.detector.steam_install.discover(allocator, context.io, steam_root);
-    defer catalog.deinit();
-    var monitor = bridge.host.session_monitor.Monitor.init(allocator, context.io, &catalog);
-    defer monitor.deinit();
-    try monitor.run(.{ .interval_ms = @max(context.interval_ms, 1000) });
-}
-
-fn watchRuneWorker(context: *const WatchAllContext) void {
-    while (true) {
-        bridge.providers.rune.watcher.run(std.heap.smp_allocator, context.io, .{
-            .roots = context.rune_roots,
-            .journal_path = context.journal_path,
-            .interval_ms = context.interval_ms,
-            .recover = context.recover,
-            .notifications = context.notifications,
-            // watch-all lives for the whole LuaTools session. Initializing the
-            // Steam client here makes Steam associate this process with the
-            // queried App ID until the process exits. Metadata and local Steam
-            // sync are deliberately handled by LuaTools through short-lived
-            // Bridge commands after an actual provider event is emitted.
-            .steam_root = null,
-        }) catch |err| {
-            std.debug.print("[AchievementBridge] provider=rune restart_reason={s}\n", .{@errorName(err)});
-            std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
-        };
-    }
-}
-
-fn watchGseWorker(context: *const WatchAllContext) void {
-    while (true) {
-        bridge.gse.watcher.run(std.heap.smp_allocator, context.io, .{
-            .roots = context.gse_roots,
-            .journal_path = context.journal_path,
-            .interval_ms = context.interval_ms,
-            .recover = context.recover,
-            .notifications = context.notifications,
-            // Keep the persistent watcher detached from every Steam App ID.
-            // LuaTools enriches and synchronizes emitted events in isolated,
-            // short-lived Bridge processes.
-            .steam_root = null,
-        }) catch |err| {
-            std.debug.print("[AchievementBridge] provider=gse restart_reason={s}\n", .{@errorName(err)});
-            std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
-        };
-    }
-}
-
-fn watchUbisoftWorker(context: *const WatchAllContext) void {
-    while (true) {
-        bridge.providers.ubisoft.watcher.run(std.heap.smp_allocator, context.io, .{
-            .spool_root = context.spool_root,
-            .journal_path = context.journal_path,
-            .interval_ms = context.interval_ms,
-            .recover = context.recover,
-            .notifications = context.notifications,
-        }) catch |err| {
-            std.debug.print("[AchievementBridge] provider=ubisoft restart_reason={s}\n", .{@errorName(err)});
-            std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
-        };
-    }
-}
-
-fn watchR2Worker(context: *const WatchAllContext) void {
-    while (true) {
-        bridge.providers.uplay_r2.watcher.run(std.heap.smp_allocator, context.io, .{
-            .roots = context.r2_roots,
-            .journal_path = context.journal_path,
-            .replay_guard_path = context.replay_guard_path,
-            .interval_ms = context.interval_ms,
-            .recover = context.recover,
-            .notifications = context.notifications,
-        }) catch |err| {
-            std.debug.print("[AchievementBridge] provider=uplay_r2 restart_reason={s}\n", .{@errorName(err)});
-            std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
-        };
-    }
-}
-
 fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli {
     var cli = Cli{};
     var index: usize = 1;
     if (index < args.len and !std.mem.startsWith(u8, args[index], "--")) {
-        if (std.mem.eql(u8, args[index], "scan")) cli.command = .scan else if (std.mem.eql(u8, args[index], "watch")) cli.command = .watch else if (std.mem.eql(u8, args[index], "watch-all")) cli.command = .watch_all else if (std.mem.eql(u8, args[index], "probe")) cli.command = .probe else if (std.mem.eql(u8, args[index], "games")) cli.command = .games else if (std.mem.eql(u8, args[index], "sessions")) cli.command = .sessions else if (std.mem.eql(u8, args[index], "host")) cli.command = .host else if (std.mem.eql(u8, args[index], "catalog")) cli.command = .catalog else if (std.mem.eql(u8, args[index], "local-record")) cli.command = .local_record else if (std.mem.eql(u8, args[index], "steam-read")) cli.command = .steam_read else if (std.mem.eql(u8, args[index], "steam-unlock")) cli.command = .steam_unlock else if (std.mem.eql(u8, args[index], "steam-local-clear")) cli.command = .steam_local_clear else if (std.mem.eql(u8, args[index], "steam-local-sync")) cli.command = .steam_local_sync else if (std.mem.eql(u8, args[index], "steam-watch")) cli.command = .steam_watch else if (std.mem.eql(u8, args[index], "gse-steam-sync")) cli.command = .gse_steam_sync else if (std.mem.eql(u8, args[index], "rune-scan")) cli.command = .rune_scan else if (std.mem.eql(u8, args[index], "rune-watch")) cli.command = .rune_watch else if (std.mem.eql(u8, args[index], "rune-steam-sync")) cli.command = .rune_steam_sync else if (std.mem.eql(u8, args[index], "ubisoft-scan")) cli.command = .ubisoft_scan else if (std.mem.eql(u8, args[index], "ubisoft-watch")) cli.command = .ubisoft_watch else if (std.mem.eql(u8, args[index], "uplay-r2-diagnose")) cli.command = .uplay_r2_diagnose else if (std.mem.eql(u8, args[index], "uplay-r2-prepare")) cli.command = .uplay_r2_prepare else if (std.mem.eql(u8, args[index], "uplay-r2-arm-replay")) cli.command = .uplay_r2_arm_replay else if (std.mem.eql(u8, args[index], "uplay-r2-scan")) cli.command = .uplay_r2_scan else if (std.mem.eql(u8, args[index], "uplay-r2-watch")) cli.command = .uplay_r2_watch else if (std.mem.eql(u8, args[index], "notify-test")) cli.command = .notify_test else if (std.mem.eql(u8, args[index], "help")) cli.command = .help else return error.UnknownCommand;
+        if (std.mem.eql(u8, args[index], "serve")) cli.command = .serve else if (std.mem.eql(u8, args[index], "scan")) cli.command = .scan else if (std.mem.eql(u8, args[index], "watch")) cli.command = .watch else if (std.mem.eql(u8, args[index], "watch-all")) cli.command = .watch_all else if (std.mem.eql(u8, args[index], "probe")) cli.command = .probe else if (std.mem.eql(u8, args[index], "games")) cli.command = .games else if (std.mem.eql(u8, args[index], "sessions")) cli.command = .sessions else if (std.mem.eql(u8, args[index], "host")) cli.command = .host else if (std.mem.eql(u8, args[index], "catalog")) cli.command = .catalog else if (std.mem.eql(u8, args[index], "local-record")) cli.command = .local_record else if (std.mem.eql(u8, args[index], "steam-read")) cli.command = .steam_read else if (std.mem.eql(u8, args[index], "steam-unlock")) cli.command = .steam_unlock else if (std.mem.eql(u8, args[index], "steam-local-clear")) cli.command = .steam_local_clear else if (std.mem.eql(u8, args[index], "steam-local-sync")) cli.command = .steam_local_sync else if (std.mem.eql(u8, args[index], "steam-watch")) cli.command = .steam_watch else if (std.mem.eql(u8, args[index], "gse-steam-sync")) cli.command = .gse_steam_sync else if (std.mem.eql(u8, args[index], "rune-scan")) cli.command = .rune_scan else if (std.mem.eql(u8, args[index], "rune-watch")) cli.command = .rune_watch else if (std.mem.eql(u8, args[index], "rune-steam-sync")) cli.command = .rune_steam_sync else if (std.mem.eql(u8, args[index], "ubisoft-scan")) cli.command = .ubisoft_scan else if (std.mem.eql(u8, args[index], "ubisoft-watch")) cli.command = .ubisoft_watch else if (std.mem.eql(u8, args[index], "uplay-r2-diagnose")) cli.command = .uplay_r2_diagnose else if (std.mem.eql(u8, args[index], "uplay-r2-prepare")) cli.command = .uplay_r2_prepare else if (std.mem.eql(u8, args[index], "uplay-r2-arm-replay")) cli.command = .uplay_r2_arm_replay else if (std.mem.eql(u8, args[index], "uplay-r2-scan")) cli.command = .uplay_r2_scan else if (std.mem.eql(u8, args[index], "uplay-r2-watch")) cli.command = .uplay_r2_watch else if (std.mem.eql(u8, args[index], "notify-test")) cli.command = .notify_test else if (std.mem.eql(u8, args[index], "help")) cli.command = .help else return error.UnknownCommand;
         index += 1;
     }
     while (index < args.len) : (index += 1) {
@@ -722,6 +654,11 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Cli {
             if (index >= args.len) return error.MissingOptionValue;
             cli.duration_ms = try std.fmt.parseInt(u32, args[index], 10);
             if (cli.duration_ms < 1000 or cli.duration_ms > 60_000) return error.InvalidNotificationDuration;
+        } else if (std.mem.eql(u8, arg, "--port")) {
+            index += 1;
+            if (index >= args.len) return error.MissingOptionValue;
+            cli.port = try std.fmt.parseInt(u16, args[index], 10);
+            if (cli.port == 0) return error.InvalidPort;
         } else if (std.mem.eql(u8, arg, "--root")) {
             index += 1;
             if (index >= args.len) return error.MissingOptionValue;
@@ -767,6 +704,7 @@ fn printHelp() void {
         \\Achievement Bridge 0.1.0 - GSE Provider MVP
         \\
         \\Uso:
+        \\  achievement-bridge serve [--port 47651] [--steam-root PATH]
         \\  achievement-bridge scan [--root PATH]
         \\  achievement-bridge watch [--root PATH] [--journal PATH] [--interval-ms 500]
         \\  achievement-bridge watch-all [--journal PATH] [--interval-ms 500]
@@ -843,6 +781,25 @@ fn defaultRuneRoot(allocator: std.mem.Allocator, environ_map: *const std.process
     return error.MissingPublicProfile;
 }
 
+fn addDefaultRockstarRoots(
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    roots: *std.ArrayList([]const u8),
+) !void {
+    if (environ_map.get("PUBLIC")) |public| {
+        try roots.append(allocator, try std.fs.path.join(allocator, &.{ public, "Documents", "Socialclub" }));
+    } else if (environ_map.get("SystemDrive")) |drive| {
+        try roots.append(allocator, try std.fs.path.join(allocator, &.{ drive, "Users", "Public", "Documents", "Socialclub" }));
+    }
+    if (environ_map.get("APPDATA")) |appdata| {
+        try roots.append(allocator, try std.fs.path.join(allocator, &.{ appdata, "Goldberg SocialClub Emu Saves" }));
+    }
+    if (environ_map.get("USERPROFILE")) |profile| {
+        try roots.append(allocator, try std.fs.path.join(allocator, &.{ profile, "Documents", "Rockstar Games", "Social Club" }));
+    }
+    if (roots.items.len == 0) return error.MissingRockstarProfileRoot;
+}
+
 fn addDefaultGseRoots(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map, roots: *std.ArrayList([]const u8)) !void {
     const appdata = environ_map.get("APPDATA") orelse return error.MissingAppData;
     try roots.append(allocator, try std.fs.path.join(allocator, &.{ appdata, "GSE Saves" }));
@@ -888,6 +845,13 @@ fn defaultLocalStorePath(allocator: std.mem.Allocator, environ_map: *const std.p
     return ".achievement-bridge/local-achievements.json";
 }
 
+fn defaultPreviewTransactionPath(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {
+    if (environ_map.get("LOCALAPPDATA")) |localappdata| {
+        return std.fs.path.join(allocator, &.{ localappdata, "AchievementBridge", "preview-transaction-v1.json" });
+    }
+    return ".achievement-bridge/preview-transaction-v1.json";
+}
+
 fn defaultR2ReplayGuardPath(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {
     if (environ_map.get("LOCALAPPDATA")) |localappdata| {
         return std.fs.path.join(allocator, &.{ localappdata, "AchievementBridge", "r2-replay-guard.json" });
@@ -917,7 +881,9 @@ fn simulateSteamNotification(
     steam_root: []const u8,
     wanted: []const u8,
     duration_ms: u32,
+    preview_transaction_path: []const u8,
 ) !void {
+    try recoverPendingSteamNotification(allocator, io, steam_root, preview_transaction_path);
     var session = try bridge.steam.adapter.connect(allocator, app_id, steam_root);
     defer session.close();
     try session.client.loadCurrentUserStats(io, app_id, 5000);
@@ -926,7 +892,16 @@ fn simulateSteamNotification(
     const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
     if (achievement.unlocked) return error.AchievementAlreadyUnlockedForPreview;
 
+    try bridge.steam.preview_transaction.save(
+        allocator,
+        io,
+        preview_transaction_path,
+        app_id,
+        achievement.api_name,
+        unixNow(io),
+    );
     try bridge.steam.adapter.previewAchievementUnlock(&session, allocator, io, achievement.api_name, duration_ms);
+    try bridge.steam.preview_transaction.clear(io, preview_transaction_path);
     std.debug.print(
         "[SteamNotificationPreview] appid={d} achievement={s} name={s} native_unlock_toast=true temporary_unlock_stored=true rollback_stored=true state_after=locked requested_duration_ms={d}\n",
         .{
@@ -935,6 +910,33 @@ fn simulateSteamNotification(
             achievement.name,
             duration_ms,
         },
+    );
+}
+
+fn recoverPendingSteamNotification(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    steam_root: []const u8,
+    preview_transaction_path: []const u8,
+) !void {
+    var pending = (try bridge.steam.preview_transaction.load(
+        allocator,
+        io,
+        preview_transaction_path,
+    )) orelse return;
+    defer pending.deinit();
+    var session = try bridge.steam.adapter.connect(allocator, pending.app_id, steam_root);
+    defer session.close();
+    const cleared = try bridge.steam.adapter.rollbackAchievementPreview(
+        &session,
+        allocator,
+        io,
+        pending.achievement,
+    );
+    try bridge.steam.preview_transaction.clear(io, preview_transaction_path);
+    std.debug.print(
+        "[SteamNotificationPreview] recovery=true appid={d} achievement={s} cleared={} state_after=locked\n",
+        .{ pending.app_id, pending.achievement, cleared },
     );
 }
 

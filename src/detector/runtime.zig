@@ -4,6 +4,7 @@ pub const RuntimeKind = enum {
     steamworks,
     gse_compatible,
     rune_compatible,
+    rockstar_social_club,
     ubisoft_connect,
     uplay_r2,
     epic_eos,
@@ -81,6 +82,14 @@ pub fn detect(allocator: std.mem.Allocator, io: std.Io, game_dir: []const u8) !R
             try report.addEvidence(.rune_compatible, 70);
         } else if (eql(name, "steamclient64.dll")) {
             try report.addEvidence(.rune_compatible, 20);
+        } else if (eql(name, "socialclub_emu.ini")) {
+            try report.addEvidence(.rockstar_social_club, 80);
+        } else if (eql(name, "rune64.dll")) {
+            try report.addEvidence(.rockstar_social_club, 20);
+        } else if (eql(name, "socialclub.dll")) {
+            try report.addEvidence(.rockstar_social_club, 20);
+        } else if (eql(name, "title.rgl")) {
+            try report.addEvidence(.rockstar_social_club, 15);
         } else if (eql(name, "eossdk-win64-shipping.dll") or eql(name, "eossdk-win32-shipping.dll")) {
             try report.addEvidence(.epic_eos, 85);
         } else if (eql(name, "uplay_r2_loader64.dll") or eql(name, "uplay_r2_loader.dll")) {
@@ -106,6 +115,11 @@ pub fn detect(allocator: std.mem.Allocator, io: std.Io, game_dir: []const u8) !R
             if (find(&report, .steamworks)) |steam| steam.confidence = @min(steam.confidence, 45);
         }
     }
+    if (find(&report, .rockstar_social_club)) |rockstar| {
+        if (rockstar.confidence >= 80) {
+            if (find(&report, .steamworks)) |steam| steam.confidence = @min(steam.confidence, 45);
+        }
+    }
     report.sort();
     return report;
 }
@@ -118,6 +132,8 @@ pub fn hasDirectIndicator(allocator: std.mem.Allocator, io: std.Io, directory: [
         "EOSSDK-Win32-Shipping.dll",
         "uplay_r2_loader64.dll",
         "upc_r2_loader64.dll",
+        "socialclub_emu.ini",
+        "socialclub.dll",
         "Galaxy64.dll",
     };
     for (indicators) |name| {
@@ -151,4 +167,26 @@ test "evidence is accumulated and sorted" {
     report.sort();
     try std.testing.expectEqual(RuntimeKind.gse_compatible, report.runtimes.items[0].kind);
     try std.testing.expectEqual(@as(u8, 45), report.runtimes.items[1].confidence);
+}
+
+test "Rockstar Social Club emulator outranks the bundled Steam API" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+    defer allocator.free(root);
+
+    const files = [_][]const u8{ "socialclub_emu.ini", "RUNE64.dll", "socialclub.dll", "steam_api64.dll" };
+    for (files) |name| {
+        const path = try std.fs.path.join(allocator, &.{ root, name });
+        defer allocator.free(path);
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+        file.close(std.testing.io);
+    }
+
+    var report = try detect(allocator, std.testing.io, root);
+    defer report.deinit();
+    try std.testing.expectEqual(RuntimeKind.rockstar_social_club, report.runtimes.items[0].kind);
+    try std.testing.expectEqual(@as(u8, 100), report.runtimes.items[0].confidence);
+    try std.testing.expectEqual(@as(u8, 45), find(&report, .steamworks).?.confidence);
 }

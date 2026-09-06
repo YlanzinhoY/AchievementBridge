@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import achievement_bridge_cli as cli
 
@@ -110,6 +110,8 @@ Provider candidates:
         self.assertEqual("NATIVO", classify_support("steam", 75, None))
         self.assertEqual("SEM SUPORTE", classify_support("epic", 85, None))
         self.assertEqual("SÓ DETECTA", classify_support("ubisoft", 90, None))
+        self.assertEqual("AGUARDA DADOS", classify_support("rockstar", 100, 77, False))
+        self.assertEqual("COMPLETO", classify_support("rockstar", 100, 77, True))
 
     def test_reads_steam_schema_count(self) -> None:
         self.assertEqual(52, parse_achievement_count("[SteamAdapter] connected=true appid=2638890 achievements=52"))
@@ -160,6 +162,87 @@ Provider candidates:
         self.assertTrue(monitor_args.no_notifications)
         self.assertTrue(monitor_args.native_toast)
         self.assertFalse(monitor_args.allow_duplicate)
+
+    def test_interactive_menu_does_not_activate_on_empty_input(self) -> None:
+        client = MagicMock()
+        with (
+            patch.object(cli, "api_client", return_value=client),
+            patch.object(cli, "print_status"),
+            patch.object(cli, "other_bridge_process_exists", return_value=False),
+            patch.object(cli.console, "print"),
+            patch.object(cli.Prompt, "ask", return_value="0") as ask,
+        ):
+            result = cli.interactive_menu(CliOptions(), Path("achievement-bridge.exe"))
+
+        self.assertEqual(0, result)
+        self.assertNotIn("default", ask.call_args.kwargs)
+
+    def test_monitor_uses_api_instead_of_second_zig_process(self) -> None:
+        client = MagicMock()
+        client.base_url = "http://127.0.0.1:47650"
+        client.stream_monitor_events.return_value = iter(())
+        options = cli.MonitorOptions(
+            bridge=None,
+            steam_root=None,
+            interval_ms=500,
+            journal=None,
+            log=None,
+            no_file_log=True,
+            no_scan=True,
+            no_notifications=True,
+            native_toast=True,
+            allow_duplicate=False,
+        )
+        setup = cli.SteamHostSetup(False, False, False, None, "não configurado")
+        with (
+            patch.object(cli, "other_bridge_process_exists", return_value=False),
+            patch.object(cli, "api_client", return_value=client),
+            patch.object(cli, "ensure_steam_host", return_value=setup),
+            patch.object(cli.subprocess, "Popen") as popen,
+        ):
+            result = cli.start_monitor(options, Path("achievement-bridge.exe"))
+
+        self.assertEqual(0, result)
+        client.ensure_started.assert_called_once_with()
+        client.request.assert_called_once_with(
+            "POST",
+            "/v1/monitor/start",
+            {"interval_ms": 500, "recover": True, "notifications": False},
+            timeout=15,
+        )
+        popen.assert_not_called()
+
+    def test_achievement_event_sync_is_routed_through_api(self) -> None:
+        client = MagicMock()
+        client.request.return_value = {"route": "steam_abi", "server_acknowledged": True}
+        event = cli.AchievementEvent(
+            provider="rune",
+            app_id=3046600,
+            product_id=None,
+            achievement="ACHIEVEMENT_02",
+            timestamp=1234,
+            recovered=False,
+        )
+        log = MagicMock()
+        with (
+            patch.object(cli, "api_client", return_value=client),
+            patch.object(cli, "run_bridge") as run_bridge,
+        ):
+            cli.sync_event(Path("achievement-bridge.exe"), event, None, True, log)
+
+        client.request.assert_called_once_with(
+            "POST",
+            "/v1/achievement-syncs",
+            {
+                "app_id": 3046600,
+                "achievement": "ACHIEVEMENT_02",
+                "provider": "rune",
+                "native_toast": True,
+                "timestamp": 1234,
+            },
+            timeout=180,
+        )
+        run_bridge.assert_not_called()
 
     def test_notification_preview_requests_explicit_temporary_write(self) -> None:
         arguments = notification_preview_arguments(

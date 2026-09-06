@@ -11,6 +11,9 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
@@ -32,14 +35,17 @@ except ImportError:  # pragma: no cover - the packaged application is Windows-on
     winreg = None  # type: ignore[assignment]
 
 
-SUPPORTED_SYNC_PROVIDERS = ("gse", "rune")
+SUPPORTED_SYNC_PROVIDERS = ("gse", "rune", "rockstar")
 MONITORED_PROVIDERS = ("ubisoft", "uplay_r2")
-PROVIDER_PRIORITY = ("gse", "rune", "uplay_r2", "ubisoft", "steam", "epic", "gog", "ea", "xbox")
+PROVIDER_PRIORITY = ("gse", "rune", "rockstar", "uplay_r2", "ubisoft", "steam", "epic", "gog", "ea", "xbox")
 DEFAULT_NOTIFICATION_PREVIEW_MS = 7000
 MIN_NOTIFICATION_PREVIEW_MS = 1000
 MAX_NOTIFICATION_PREVIEW_MS = 60_000
+DEFAULT_API_URL = "http://127.0.0.1:47650"
 console = Console(highlight=False)
 ResultType = TypeVar("ResultType")
+_api_clients: dict[tuple[Path, str | None], "BridgeApiClient"] = {}
+_api_clients_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -56,6 +62,7 @@ class SupportReport:
     confidence: int
     achievement_count: int | None
     status: str
+    state_available: bool = True
 
 
 @dataclass(frozen=True)
@@ -104,6 +111,171 @@ class SteamHostSetup:
     restart_required: bool
     library: Path | None
     message: str
+
+
+class BridgeApiClient:
+    """Typed UI boundary for the local Go control plane."""
+
+    def __init__(self, bridge: Path, steam_root: str | None) -> None:
+        self.bridge = bridge
+        self.steam_root = steam_root
+        self.base_url = os.environ.get("ACHIEVEMENT_BRIDGE_API_URL", DEFAULT_API_URL).rstrip("/")
+        self._startup_lock = threading.Lock()
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, object] | None = None,
+        timeout: float | None = 45,
+    ) -> dict[str, object]:
+        try:
+            return self._request_once(method, path, payload, timeout)
+        except ConnectionError:
+            self.ensure_started()
+            return self._request_once(method, path, payload, timeout)
+
+    def ensure_started(self) -> None:
+        with self._startup_lock:
+            try:
+                self._request_once("GET", "/v1/health", timeout=1)
+                return
+            except (ConnectionError, RuntimeError):
+                pass
+
+            api = find_api(self.bridge)
+            arguments = api_start_arguments(api, self.bridge, self.steam_root)
+            log_path = Path(default_api_log_path())
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            with log_path.open("a", encoding="utf-8", newline="") as log_file:
+                subprocess.Popen(
+                    arguments,
+                    cwd=api.parent,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    creationflags=creation_flags,
+                )
+
+            last_error: Exception | None = None
+            # The Zig core may be completing an interrupted Steam preview.
+            # StoreStats recovery is intentionally allowed to outlive the
+            # normal fast startup path.
+            for _ in range(1800):
+                time.sleep(0.1)
+                try:
+                    self._request_once("GET", "/v1/health", timeout=1)
+                    return
+                except (ConnectionError, RuntimeError) as error:
+                    last_error = error
+            raise RuntimeError(
+                f"a API local não ficou disponível; consulte {log_path}"
+            ) from last_error
+
+    def _request_once(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, object] | None = None,
+        timeout: float | None = 45,
+    ) -> dict[str, object]:
+        body = None if payload is None else json.dumps(payload).encode("utf-8")
+        headers = {"Accept": "application/json"}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=body,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                decoded = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            try:
+                details = json.loads(error.read().decode("utf-8")).get("error", {})
+                code = str(details.get("code", "api_error"))
+                message = str(details.get("message", code))
+            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+                code = "api_error"
+                message = str(error)
+            friendly = {
+                "AchievementAlreadyUnlockedForPreview": (
+                    "essa conquista já está desbloqueada e não pode ser usada na simulação"
+                ),
+                "AchievementNotFound": "a Steam não encontrou essa conquista",
+            }.get(code, message)
+            raise RuntimeError(friendly) from error
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
+            raise ConnectionError("a API local do Achievement Bridge não está disponível") from error
+        if not isinstance(decoded, dict):
+            raise RuntimeError("a API local retornou uma resposta inválida")
+        return decoded
+
+    def stream_monitor_events(self) -> Iterable[str]:
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/monitor/events",
+            headers={"Accept": "text/event-stream"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=None) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if not line.startswith("data: "):
+                        continue
+                    value = json.loads(line[6:])
+                    if isinstance(value, str):
+                        yield value
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
+            raise ConnectionError("o stream de eventos do Bridge foi encerrado") from error
+
+    def shutdown(self) -> None:
+        try:
+            self._request_once("POST", "/v1/shutdown", {}, timeout=5)
+        except (ConnectionError, RuntimeError):
+            pass
+
+
+def find_api(bridge: Path) -> Path:
+    root = application_root()
+    candidates = (
+        os.environ.get("ACHIEVEMENT_BRIDGE_API_PATH"),
+        str(bridge.parent / "achievement-bridge-api.exe"),
+        str(root / "achievement-bridge-api.exe"),
+        str(root / "zig-out" / "bin" / "achievement-bridge-api.exe"),
+    )
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return Path(candidate).resolve()
+    raise FileNotFoundError(
+        "achievement-bridge-api.exe não encontrada; execute o build do gateway Go"
+    )
+
+
+def api_start_arguments(api: Path, bridge: Path, steam_root: str | None) -> list[str]:
+    arguments = [
+        str(api),
+        "--core",
+        str(bridge),
+        "--parent-pid",
+        str(os.getpid()),
+    ]
+    if steam_root:
+        arguments += ["--steam-root", steam_root]
+    return arguments
+
+
+def api_client(bridge: Path, steam_root: str | None) -> BridgeApiClient:
+    key = (bridge, steam_root)
+    with _api_clients_lock:
+        client = _api_clients.get(key)
+        if client is None:
+            client = BridgeApiClient(bridge, steam_root)
+            _api_clients[key] = client
+        return client
 
 
 class EventParser:
@@ -359,23 +531,30 @@ def request_notification_preview(
     steam_root: str | None,
     duration_ms: int = DEFAULT_NOTIFICATION_PREVIEW_MS,
     wait_for_game_dir: str | None = None,
-) -> subprocess.CompletedProcess[str]:
-    arguments = notification_preview_arguments(
+) -> dict[str, object]:
+    notification_preview_arguments(
         app_id,
         achievement,
         steam_root,
         duration_ms,
         wait_for_game_dir,
     )
-    # Both StoreStats phases can be delayed by Steam's rate limiter. The Zig
-    # transaction remains responsible for restoring the locked state.
+    payload: dict[str, object] = {
+        "app_id": app_id,
+        "achievement": achievement.strip(),
+        "duration_ms": duration_ms,
+    }
+    if wait_for_game_dir is not None:
+        payload["wait_for_game_dir"] = wait_for_game_dir
+    # The transaction can wait for Steam's StoreStats rate limiter. Zig owns
+    # the unlock and rollback state; the UI only waits for the final result.
     timeout = None if wait_for_game_dir is not None else max(300, duration_ms // 1000 + 270)
-    result = run_bridge(bridge, arguments, timeout=timeout)
-    if result.returncode != 0:
-        raise RuntimeError(result.stdout.strip() or "não foi possível simular o popup da Steam")
-    if "[SteamNotificationPreview]" not in result.stdout:
-        raise RuntimeError("a Steam não confirmou a solicitação da prévia")
-    return result
+    return api_client(bridge, steam_root).request(
+        "POST",
+        "/v1/achievement-previews",
+        payload,
+        timeout=timeout,
+    )
 
 
 def parse_installed_games(output: str) -> list[InstalledGame]:
@@ -438,8 +617,15 @@ def parse_available_achievements(output: str) -> list[AvailableAchievement]:
     return achievements
 
 
-def classify_support(provider: str, confidence: int, achievements: int | None) -> str:
+def classify_support(
+    provider: str,
+    confidence: int,
+    achievements: int | None,
+    state_available: bool = True,
+) -> str:
     if provider in SUPPORTED_SYNC_PROVIDERS and confidence >= 60:
+        if provider == "rockstar" and not state_available:
+            return "AGUARDA DADOS"
         return "COMPLETO" if achievements is None or achievements > 0 else "SEM CATÁLOGO"
     if provider in MONITORED_PROVIDERS and confidence >= 60:
         return "SÓ DETECTA"
@@ -449,47 +635,59 @@ def classify_support(provider: str, confidence: int, achievements: int | None) -
 
 
 def read_available_achievements(bridge: Path, app_id: int, steam_root: str | None) -> list[AvailableAchievement]:
-    arguments = ["steam-read", "--appid", str(app_id)]
-    if steam_root:
-        arguments += ["--steam-root", steam_root]
-    result = run_bridge(bridge, arguments, timeout=45)
-    if result.returncode != 0:
-        raise RuntimeError(result.stdout.strip() or f"não foi possível ler as conquistas do AppID {app_id}")
-    achievements = parse_available_achievements(result.stdout)
+    result = api_client(bridge, steam_root).request(
+        "GET",
+        f"/v1/games/{app_id}/achievements",
+        timeout=45,
+    )
+    raw_achievements = result.get("achievements")
+    if not isinstance(raw_achievements, list):
+        raise RuntimeError(f"a API não retornou um catálogo válido para o AppID {app_id}")
+    achievements = [
+        AvailableAchievement(
+            index=index,
+            api_name=str(item.get("api_name", "")),
+            unlocked=bool(item.get("unlocked", False)),
+            name=str(item.get("name", "")),
+            global_percent=float(item.get("global_percent") or 0),
+        )
+        for index, item in enumerate(raw_achievements)
+        if isinstance(item, dict) and item.get("api_name")
+    ]
     if not achievements:
         raise RuntimeError(f"a Steam não retornou um catálogo de conquistas para o AppID {app_id}")
     return achievements
 
 
 def inspect_installed_games(bridge: Path, steam_root: str | None, verify_schema: bool = True) -> list[SupportReport]:
-    arguments = ["games"]
-    if steam_root:
-        arguments += ["--steam-root", steam_root]
-    games_result = run_bridge(bridge, arguments)
-    if games_result.returncode != 0:
-        raise RuntimeError(games_result.stdout.strip() or "não foi possível listar os jogos Steam")
-
-    reports: list[SupportReport] = []
-    for game in parse_installed_games(games_result.stdout):
-        probe_args = ["probe", "--game-dir", str(game.directory)]
-        if steam_root:
-            probe_args += ["--steam-root", steam_root]
-        probe = run_bridge(bridge, probe_args)
-        provider, confidence = best_provider(parse_provider_candidates(probe.stdout))
-        achievement_count: int | None = None
-        if verify_schema and provider in SUPPORTED_SYNC_PROVIDERS and confidence >= 60:
-            read_args = ["steam-read", "--appid", str(game.app_id)]
-            if steam_root:
-                read_args += ["--steam-root", steam_root]
-            achievement_count = parse_achievement_count(run_bridge(bridge, read_args).stdout)
-        reports.append(SupportReport(
-            game=game,
-            provider=provider,
-            confidence=confidence,
-            achievement_count=achievement_count,
-            status=classify_support(provider, confidence, achievement_count),
-        ))
-    return reports
+    result = api_client(bridge, steam_root).request(
+        "GET",
+        f"/v1/games?verify_schema={'true' if verify_schema else 'false'}",
+        timeout=180,
+    )
+    raw_games = result.get("games")
+    if not isinstance(raw_games, list):
+        raise RuntimeError("a API não retornou uma lista válida de jogos Steam")
+    return [
+        SupportReport(
+            game=InstalledGame(
+                app_id=int(item["app_id"]),
+                name=str(item["name"]),
+                directory=Path(str(item["directory"])),
+            ),
+            provider=str(item["provider"]),
+            confidence=int(item["confidence"]),
+            achievement_count=(
+                int(item["achievement_count"])
+                if item.get("achievement_count") is not None
+                else None
+            ),
+            status=str(item["status"]),
+            state_available=bool(item.get("state_available", True)),
+        )
+        for item in raw_games
+        if isinstance(item, dict)
+    ]
 
 
 def print_game_table(reports: list[SupportReport]) -> None:
@@ -504,6 +702,7 @@ def print_game_table(reports: list[SupportReport]) -> None:
         "COMPLETO": "bold green",
         "NATIVO": "cyan",
         "SÓ DETECTA": "yellow",
+        "AGUARDA DADOS": "yellow",
         "SEM CATÁLOGO": "yellow",
         "SEM SUPORTE": "red",
     }
@@ -520,6 +719,7 @@ def print_game_table(reports: list[SupportReport]) -> None:
     console.print("[bold green]COMPLETO[/]  Bridge detecta e sincroniza com a Steam")
     console.print("[cyan]NATIVO[/]    O próprio jogo usa Steamworks; não precisa do Bridge")
     console.print("[yellow]SÓ DETECTA[/] O Bridge vê o evento, mas a CLI ainda não sincroniza sozinha")
+    console.print("[yellow]AGUARDA DADOS[/] Rockstar detectado; aguardando um estado local de conquistas legível")
     console.print("[yellow]SEM CATÁLOGO[/] O provedor existe, mas a Steam não retornou conquistas")
     console.print("[red]SEM SUPORTE[/] Provedor de conquistas ainda não implementado")
 
@@ -549,7 +749,36 @@ def print_achievement_table(game: InstalledGame, achievements: list[AvailableAch
 
 
 def other_bridge_process_exists() -> bool:
-    return process_is_running("achievement-bridge.exe")
+    try:
+        request = urllib.request.Request(
+            f"{os.environ.get('ACHIEVEMENT_BRIDGE_API_URL', DEFAULT_API_URL).rstrip('/')}/v1/health",
+            headers={"Accept": "application/json"},
+            method="GET",
+        )
+        with urllib.request.urlopen(request, timeout=0.5) as response:
+            health = json.loads(response.read().decode("utf-8"))
+        if bool(health.get("core", {}).get("monitoring", False)):
+            return True
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, AttributeError):
+        pass
+    if os.name != "nt":
+        return False
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process -Filter \"Name = 'achievement-bridge.exe'\" | "
+            "Select-Object -ExpandProperty CommandLine",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    return any("watch-all" in line.lower() for line in result.stdout.splitlines())
 
 
 def process_is_running(image_name: str) -> bool:
@@ -618,7 +847,7 @@ def show_available_achievements(args: CliOptions, bridge: Path) -> None:
     reports = inspect_installed_games(bridge, args.steam_root, verify_schema=False)
     eligible = [
         report for report in reports
-        if report.status in {"COMPLETO", "NATIVO", "SÓ DETECTA"}
+        if report.status in {"COMPLETO", "NATIVO", "SÓ DETECTA", "AGUARDA DADOS"}
     ]
     if not eligible:
         console.print(Panel("Nenhum jogo compatível foi encontrado.", border_style="yellow"))
@@ -661,7 +890,7 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
     reports = inspect_installed_games(bridge, args.steam_root, verify_schema=False)
     eligible = [
         report for report in reports
-        if report.status in {"COMPLETO", "NATIVO", "SÓ DETECTA"}
+        if report.status in {"COMPLETO", "NATIVO", "SÓ DETECTA", "AGUARDA DADOS"}
     ]
     if not eligible:
         console.print(Panel("Nenhum jogo compatível foi encontrado.", border_style="yellow"))
@@ -767,6 +996,7 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
 
 
 def interactive_menu(args: CliOptions, bridge: Path) -> int:
+    api_client(bridge, args.steam_root).ensure_started()
     while True:
         clear_screen()
         print_status(bridge)
@@ -789,7 +1019,6 @@ def interactive_menu(args: CliOptions, bridge: Path) -> int:
             choice = Prompt.ask(
                 "[bold]Escolha uma opção[/]",
                 choices=("1", "2", "3", "4", "5", "0"),
-                default="1",
                 show_choices=False,
                 show_default=False,
             )
@@ -832,32 +1061,31 @@ def sync_event(bridge: Path, event: AchievementEvent, steam_root: str | None, na
         log.write(f"SYNC PENDENTE appid={event.app_id} provider={event.provider}: mapeamento standalone ainda indisponível")
         return
 
-    command = f"{event.provider}-steam-sync"
-    arguments = [command, "--appid", str(event.app_id), "--achievement", event.achievement]
-    if steam_root:
-        arguments += ["--steam-root", steam_root]
-    result = run_bridge(bridge, arguments, timeout=45)
-    if result.returncode == 0:
-        log.write(f"STEAM OK appid={event.app_id} achievement={event.achievement} {result.stdout.strip()}")
-        return
-
-    # Protected schemas can reject the public ABI. Preserve the verified event
-    # in Steam's native local cache as the same fallback used by LuaTools.
-    fallback = ["steam-local-sync", "--appid", str(event.app_id), "--achievement", event.achievement]
+    payload: dict[str, object] = {
+        "app_id": event.app_id,
+        "achievement": event.achievement,
+        "provider": event.provider,
+        "native_toast": native_toast,
+    }
     if event.timestamp and event.timestamp > 0:
-        fallback += ["--timestamp", str(event.timestamp)]
-    if native_toast:
-        fallback.append("--experimental-steam-notification")
-    if steam_root:
-        fallback += ["--steam-root", steam_root]
-    local = run_bridge(bridge, fallback, timeout=45)
-    if local.returncode == 0:
-        log.write(f"STEAM CACHE OK appid={event.app_id} achievement={event.achievement} {local.stdout.strip()}")
-    else:
-        log.write(
-            f"STEAM FALHOU appid={event.app_id} achievement={event.achievement} "
-            f"direct={result.stdout.strip()} fallback={local.stdout.strip()}"
+        payload["timestamp"] = event.timestamp
+    try:
+        result = api_client(bridge, steam_root).request(
+            "POST",
+            "/v1/achievement-syncs",
+            payload,
+            timeout=180,
         )
+    except (ConnectionError, RuntimeError) as error:
+        log.write(
+            f"STEAM FALHOU appid={event.app_id} achievement={event.achievement} error={error}"
+        )
+        return
+    route = result.get("route", "unknown")
+    log.write(
+        f"STEAM OK appid={event.app_id} achievement={event.achievement} "
+        f"route={route} result={json.dumps(result, ensure_ascii=False, separators=(',', ':'))}"
+    )
 
 
 def start_monitor(args: MonitorOptions, bridge: Path) -> int:
@@ -865,6 +1093,12 @@ def start_monitor(args: MonitorOptions, bridge: Path) -> int:
         print("Já existe um Achievement Bridge rodando (provavelmente iniciado pelo LuaTools).")
         print("Feche o LuaTools ou use --allow-duplicate conscientemente.")
         return 2
+
+    # Starting the Bridge means the public local API must be available too.
+    # The gateway owns the only persistent Zig core and streams its events back
+    # to this interface, avoiding a second watch-all process.
+    client = api_client(bridge, args.steam_root)
+    client.ensure_started()
 
     log_path = None if args.no_file_log else Path(args.log or default_log_path())
     log = LogSink(log_path)
@@ -880,32 +1114,23 @@ def start_monitor(args: MonitorOptions, bridge: Path) -> int:
     if not args.no_scan:
         reports = inspect_installed_games(bridge, args.steam_root, verify_schema=True)
         print_game_table(reports)
-    command = [str(bridge), "watch-all", "--interval-ms", str(args.interval_ms)]
+    monitor_request: dict[str, object] = {
+        "interval_ms": args.interval_ms,
+        "recover": True,
+        "notifications": not args.no_notifications,
+    }
     if args.journal:
-        command += ["--journal", args.journal]
-    if args.no_notifications:
-        command.append("--no-notifications")
+        monitor_request["journal_path"] = args.journal
+    client.request("POST", "/v1/monitor/start", monitor_request, timeout=15)
 
-    log.write(f"INICIANDO executable={bridge}")
+    log.write(f"INICIANDO api={client.base_url} core={bridge}")
     if log_path:
         log.write(f"LOG arquivo={log_path}")
-    process = subprocess.Popen(
-        command,
-        cwd=bridge.parent,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-    )
     parser = EventParser()
     workers = ThreadPoolExecutor(max_workers=2, thread_name_prefix="steam-sync")
     last_session_heartbeat: str | None = None
     try:
-        assert process.stdout is not None
-        for raw_line in process.stdout:
-            line = raw_line.rstrip("\r\n")
+        for line in client.stream_monitor_events():
             if line.startswith("[AchievementBridge] active_game_sessions="):
                 if line == last_session_heartbeat:
                     continue
@@ -918,16 +1143,11 @@ def start_monitor(args: MonitorOptions, bridge: Path) -> int:
                     f"achievement={event.achievement} recovered={event.recovered}"
                 )
                 workers.submit(sync_event, bridge, event, args.steam_root, args.native_toast, log)
-        return_code = process.wait()
-        log.write(f"ENCERRADO exit_code={return_code}")
-        return return_code
+        log.write("ENCERRADO stream de eventos finalizado")
+        return 0
     except KeyboardInterrupt:
         log.write("ENCERRANDO solicitado pelo usuário")
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        client.shutdown()
         return 0
     finally:
         workers.shutdown(wait=True, cancel_futures=False)
@@ -937,6 +1157,11 @@ def start_monitor(args: MonitorOptions, bridge: Path) -> int:
 def default_log_path() -> str:
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".achievement-bridge")
     return str(Path(base) / "AchievementBridge" / "bridge-cli.log")
+
+
+def default_api_log_path() -> str:
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".achievement-bridge")
+    return str(Path(base) / "AchievementBridge" / "bridge-api.log")
 
 
 app = typer.Typer(

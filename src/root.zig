@@ -12,6 +12,7 @@ pub const detector = struct {
 };
 pub const resolver = @import("resolver/provider_resolver.zig");
 pub const host = struct {
+    pub const all_watchers = @import("host/all_watchers.zig");
     pub const session_monitor = @import("host/session_monitor.zig");
 };
 pub const registry = struct {
@@ -25,6 +26,9 @@ pub const notifications = struct {
 pub const local = struct {
     pub const store = @import("local/store.zig");
 };
+pub const control = struct {
+    pub const server = @import("control/server.zig");
+};
 pub const steam = struct {
     pub const adapter = @import("steam/adapter.zig");
     pub const binary_key_values = @import("steam/binary_key_values.zig");
@@ -36,6 +40,7 @@ pub const steam = struct {
     pub const user_stats = @import("steam/user_stats.zig");
     pub const vtable = @import("steam/vtable.zig");
     pub const metadata = @import("steam/metadata.zig");
+    pub const preview_transaction = @import("steam/preview_transaction.zig");
     pub const schema = @import("steam/schema.zig");
 };
 pub const gse = struct {
@@ -50,6 +55,14 @@ pub const providers = struct {
         pub const snapshot = @import("providers/rune/snapshot.zig");
         pub const discovery = @import("providers/rune/discovery.zig");
         pub const watcher = @import("providers/rune/watcher.zig");
+    };
+    pub const rockstar = struct {
+        pub const snapshot = @import("providers/rockstar/snapshot.zig");
+        pub const discovery = @import("providers/rockstar/discovery.zig");
+        pub const watcher = @import("providers/rockstar/watcher.zig");
+        pub const games = struct {
+            pub const gtav_enhanced = @import("providers/rockstar/games/gtav_enhanced.zig");
+        };
     };
     pub const steam = struct {
         pub const watcher = @import("providers/steam/watcher.zig");
@@ -109,4 +122,8 @@ test {
     _ = providers.rune.snapshot;
     _ = providers.rune.discovery;
     _ = providers.rune.watcher;
+    _ = providers.rockstar.snapshot;
+    _ = providers.rockstar.discovery;
+    _ = providers.rockstar.watcher;
+    _ = providers.rockstar.games.gtav_enhanced;
 }
