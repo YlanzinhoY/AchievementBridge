@@ -60,6 +60,9 @@ pub const providers = struct {
         pub const snapshot = @import("providers/rockstar/snapshot.zig");
         pub const discovery = @import("providers/rockstar/discovery.zig");
         pub const watcher = @import("providers/rockstar/watcher.zig");
+        pub const games = struct {
+            pub const gtav_enhanced = @import("providers/rockstar/games/gtav_enhanced.zig");
+        };
     };
     pub const steam = struct {
         pub const watcher = @import("providers/steam/watcher.zig");
@@ -122,4 +125,5 @@ test {
     _ = providers.rockstar.snapshot;
     _ = providers.rockstar.discovery;
     _ = providers.rockstar.watcher;
+    _ = providers.rockstar.games.gtav_enhanced;
 }

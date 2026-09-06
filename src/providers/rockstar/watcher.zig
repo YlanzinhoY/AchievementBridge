@@ -8,6 +8,7 @@ const MetadataCatalog = @import("../../core/metadata.zig").Catalog;
 const steam_metadata = @import("../../steam/metadata.zig");
 const mapper = @import("../../core/mapper.zig");
 const steam_install = @import("../../detector/steam_install.zig");
+const gtav_enhanced = @import("games/gtav_enhanced.zig");
 
 pub const Options = struct {
     roots: []const []const u8,
@@ -28,6 +29,22 @@ const TrackedState = struct {
     fn deinit(self: *TrackedState, allocator: std.mem.Allocator) void {
         self.state.deinit();
         allocator.free(self.state_file);
+        self.* = undefined;
+    }
+};
+
+const GtavEnhancedState = struct {
+    monitor: gtav_enhanced.Monitor,
+    previous: ?gtav_enhanced.UnlockSet = null,
+    pid: ?u32 = null,
+    last_error: ?anyerror = null,
+
+    fn init(allocator: std.mem.Allocator) GtavEnhancedState {
+        return .{ .monitor = gtav_enhanced.Monitor.init(allocator) };
+    }
+
+    fn deinit(self: *GtavEnhancedState) void {
+        self.monitor.deinit();
         self.* = undefined;
     }
 };
@@ -62,12 +79,24 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     defer if (steam_catalog) |*catalog| catalog.deinit();
     var resolved_options = options;
     resolved_options.steam_root = steam_root;
+    var gtav_state = GtavEnhancedState.init(allocator);
+    defer gtav_state.deinit();
 
     std.debug.print("[RockstarProvider] status=discovering source=social_club\n", .{});
     while (true) {
         const apps = if (steam_catalog) |*catalog| catalog.apps.items else &.{};
         try discoverNewStates(allocator, io, resolved_options, apps, &journal, &tracked, &notifier, &metadata, &metadata_attempted);
         for (tracked.items) |*state| try checkState(allocator, io, &journal, state, &notifier, &metadata);
+        try checkGtavEnhanced(
+            allocator,
+            io,
+            steam_root,
+            &journal,
+            &gtav_state,
+            &notifier,
+            &metadata,
+            &metadata_attempted,
+        );
         try std.Io.sleep(io, .fromMilliseconds(options.interval_ms), .awake);
     }
 }
@@ -92,14 +121,7 @@ fn discoverNewStates(
         if (isTracked(tracked.items, candidate.state_file)) continue;
         var current = readSnapshot(allocator, io, candidate.state_file) catch continue;
         errdefer current.deinit();
-        if (options.steam_root) |steam_root| {
-            if (!metadata_attempted.contains(candidate.app_id)) {
-                try metadata_attempted.put(candidate.app_id, {});
-                steam_metadata.loadInto(metadata, allocator, candidate.app_id, steam_root) catch |err| {
-                    std.debug.print("[RockstarProvider] steam_metadata=unavailable appid={d} reason={s}\n", .{ candidate.app_id, @errorName(err) });
-                };
-            }
-        }
+        try ensureSteamMetadata(allocator, options.steam_root, candidate.app_id, metadata, metadata_attempted);
         const stat = try std.Io.Dir.cwd().statFile(io, candidate.state_file, .{});
         if (!journal.hasSeenProviderGame(.rockstar, candidate.app_id) or first_seen_apps.contains(candidate.app_id)) {
             var iterator = current.achievements.iterator();
@@ -125,6 +147,84 @@ fn discoverNewStates(
     }
     var iterator = first_seen_apps.keyIterator();
     while (iterator.next()) |app_id| try journal.markProviderGame(.rockstar, app_id.*);
+}
+
+fn checkGtavEnhanced(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    steam_root: ?[]const u8,
+    journal: *Journal,
+    tracked: *GtavEnhancedState,
+    notifier: *?WindowsNotifier,
+    metadata: *MetadataCatalog,
+    metadata_attempted: *std.AutoHashMap(u32, void),
+) !void {
+    const sampled = tracked.monitor.sample() catch |err| {
+        if (tracked.last_error == null or tracked.last_error.? != err) {
+            std.debug.print("[RockstarProvider] adapter=gtav_enhanced status=waiting reason={s}\n", .{@errorName(err)});
+        }
+        tracked.last_error = err;
+        return;
+    };
+    tracked.last_error = null;
+    const sample = sampled orelse {
+        if (tracked.pid != null) {
+            std.debug.print("[RockstarProvider] adapter=gtav_enhanced status=stopped pid={d}\n", .{tracked.pid.?});
+        }
+        tracked.previous = null;
+        tracked.pid = null;
+        return;
+    };
+
+    try ensureSteamMetadata(allocator, steam_root, gtav_enhanced.app_id, metadata, metadata_attempted);
+    if (sample.just_attached or tracked.previous == null or tracked.pid != sample.pid) {
+        // A live process begins with a baseline: achievements that existed before
+        // the Bridge attached must not produce a burst of historical popups.
+        for (1..gtav_enhanced.maximum_internal_id + 1) |internal_id| {
+            if (!sample.unlocked.isSet(internal_id)) continue;
+            const api_name = gtav_enhanced.steamAchievement(internal_id) orelse continue;
+            try journal.recordProviderBaseline(.rockstar, gtav_enhanced.app_id, api_name, 0);
+        }
+        try journal.markProviderGame(.rockstar, gtav_enhanced.app_id);
+        tracked.previous = sample.unlocked;
+        tracked.pid = sample.pid;
+        std.debug.print(
+            "[RockstarProvider] adapter=gtav_enhanced appid={d} status=watching pid={d} unlocked={d}/{d} source=live_memory\n",
+            .{ gtav_enhanced.app_id, sample.pid, sample.unlocked.count(), gtav_enhanced.maximum_internal_id },
+        );
+        return;
+    }
+
+    const previous = tracked.previous.?;
+    for (1..gtav_enhanced.maximum_internal_id + 1) |internal_id| {
+        if (!sample.unlocked.isSet(internal_id) or previous.isSet(internal_id)) continue;
+        const api_name = gtav_enhanced.steamAchievement(internal_id) orelse continue;
+        const detected_at = unixNow(io);
+        const achievement = event.AchievementEvent{
+            .app_id = gtav_enhanced.app_id,
+            .source_id = api_name,
+            .provider = .rockstar,
+            .unlocked_at = detected_at,
+            .detected_at = detected_at,
+        };
+        if (try journal.recordEvent(achievement)) emitEvent(allocator, notifier, metadata, achievement);
+    }
+    tracked.previous = sample.unlocked;
+}
+
+fn ensureSteamMetadata(
+    allocator: std.mem.Allocator,
+    steam_root: ?[]const u8,
+    app_id: u32,
+    metadata: *MetadataCatalog,
+    attempted: *std.AutoHashMap(u32, void),
+) !void {
+    const root = steam_root orelse return;
+    if (attempted.contains(app_id)) return;
+    try attempted.put(app_id, {});
+    steam_metadata.loadInto(metadata, allocator, app_id, root) catch |err| {
+        std.debug.print("[RockstarProvider] steam_metadata=unavailable appid={d} reason={s}\n", .{ app_id, @errorName(err) });
+    };
 }
 
 fn replayMissed(
