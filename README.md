@@ -19,6 +19,8 @@ A interface Python cuida somente de entrada e apresentação. Catálogo, descobe
 
 Essa divisão evita criar um novo processo Zig a cada clique e deixa uma futura GUI consumir a mesma API sem duplicar regras. Ao ativar o monitor, os providers passam a rodar dentro desse mesmo core e os logs chegam à interface por Server-Sent Events. O estado normal é um processo `achievement-bridge.exe` e um processo `achievement-bridge-api.exe`; a sincronização de um evento também atravessa a API, sem abrir um segundo Zig. O contrato e os limites de cada camada estão detalhados em [`docs/architecture.md`](docs/architecture.md).
 
+Quando a CLI inicia esse par, a API acompanha o processo da interface e encerra o core automaticamente se a janela for fechada. Executar `achievement-bridge-api.exe` manualmente, sem `--parent-pid`, mantém o serviço ativo de propósito até `POST /v1/shutdown` ou o encerramento do processo.
+
 ## CLI aberta
 
 `achievement_bridge_cli.py` é uma interface standalone em Python 3.10+, construída com Typer e Rich.

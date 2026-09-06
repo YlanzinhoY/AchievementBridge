@@ -17,6 +17,8 @@ The Python application owns rendering, prompts and user-friendly error messages.
 
 When installed, the CLI locates `achievement-bridge-api.exe` beside itself. When run from the source tree it locates the gateway in `zig-out/bin`. If the API is not running, the CLI starts it once in the background and records its output in `%LOCALAPPDATA%\AchievementBridge\bridge-api.log`.
 
+The CLI passes its process ID to the API. On Windows, Go waits on that process handle and shuts down itself plus its owned Zig child when the UI disappears, including when the terminal window is closed abruptly. A manually launched API omits this option and keeps the explicit service-style lifetime.
+
 ## Go control plane
 
 The Go process is the stable API boundary for any user interface. It:
