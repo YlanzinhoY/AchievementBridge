@@ -1,6 +1,6 @@
 # Achievement Bridge
 
-Bridge de conquistas Windows-only em Zig 0.16.0. Ele detecta jogos e runtimes, acompanha conquistas locais de GSE/Goldberg, RUNE, Steam, Ubisoft Connect e Uplay R2-compatible, normaliza os eventos, mantém um journal resiliente e mostra notificações nativas do Windows.
+Bridge de conquistas Windows-only com núcleo em Zig 0.16.0, API local em Go e interface Typer/Rich em Python. Ele detecta jogos e runtimes, acompanha conquistas locais de GSE/Goldberg, RUNE, Steam, Ubisoft Connect e Uplay R2-compatible, normaliza os eventos, mantém um journal resiliente e mostra notificações nativas do Windows.
 
 O acesso direto ao `ISteamUserStats` é somente leitura por padrão. As exceções de escrita são o comando manual `steam-unlock`, o simulador transacional de toast e os syncs GSE/RUNE verificados. O simulador e o desbloqueio manual exigem `--confirm-steam-write`; os syncs só prosseguem após reler o save e comprovar o desbloqueio para o mesmo AppID/API name. Separadamente, a integração LuaTools e a CLI standalone sincronizam cada evento real do provider com o cache local da Steam como fallback. Uma tentativa opt-in de toast de progresso do Steam Overlay também está disponível como experimento e é descrita abaixo.
 
@@ -8,23 +8,30 @@ O acesso direto ao `ISteamUserStats` é somente leitura por padrão. As exceçõ
 
 ```powershell
 zig build
-zig build test
+go -C api build -o ..\zig-out\bin\achievement-bridge-api.exe .\cmd\achievement-bridge-api
 ```
 
-Os artefatos serão criados em `zig-out/bin/achievement-bridge.exe` e `zig-out/bin/achievement-bridge-cloud.dll`.
+Os artefatos serão criados em `zig-out/bin/achievement-bridge.exe`, `zig-out/bin/achievement-bridge-api.exe` e `zig-out/bin/achievement-bridge-cloud.dll`.
+
+## Arquitetura separada
+
+A interface Python cuida somente de entrada e apresentação. Catálogo, descoberta de jogos e simulação de toast são solicitados à API Go em `127.0.0.1:47650`. O gateway inicia e supervisiona o núcleo Zig persistente, comunicando-se com ele por JSON delimitado por linha em `127.0.0.1:47651`. Apenas o Zig conhece a ABI Steam e mantém a sessão ativa; o Go traduz o protocolo interno para HTTP/JSON e nenhum dos dois serviços aceita conexões fora do loopback.
+
+Essa divisão evita criar um novo processo Zig a cada clique e deixa uma futura GUI consumir a mesma API sem duplicar regras. O contrato e os limites de cada camada estão detalhados em [`docs/architecture.md`](docs/architecture.md).
 
 ## CLI aberta
 
 `achievement_bridge_cli.py` é uma interface standalone em Python 3.10+, construída com Typer e Rich.
-Ela inicia o host Zig, mantém os logs visíveis e persistentes, informa qual jogo está ativo, classifica
-a compatibilidade da biblioteca Steam e sincroniza eventos GSE/RUNE verificados. Ela não contém nem
+Ela inicia o gateway Go quando necessário, mantém os logs visíveis e persistentes, informa qual jogo está ativo, exibe
+a compatibilidade calculada pelo núcleo e sincroniza eventos GSE/RUNE verificados. Ela não contém nem
 depende de código do LuaTools. Na primeira abertura, `bridge-cli.cmd` cria uma `.venv` isolada e instala
-automaticamente a dependência declarada em `requirements-cli.txt`.
+automaticamente a dependência declarada em `requirements-cli.txt`; em uma árvore de fontes também compila o gateway se ele ainda não existir.
 
 No Windows, compile o núcleo e abra a CLI:
 
 ```powershell
 zig build -Doptimize=ReleaseSafe
+go -C api build -o ..\zig-out\bin\achievement-bridge-api.exe .\cmd\achievement-bridge-api
 .\bridge-cli.cmd
 ```
 
@@ -33,7 +40,7 @@ monitor e acompanhar os eventos ao vivo, `2` para consultar a compatibilidade do
 `3` para escolher um jogo e ver suas conquistas disponíveis, `4` para simular um popup nativo da
 Steam ou `0` para sair. Nada começa a monitorar até o usuário escolher **Ativar Bridge**.
 
-O log também fica em `%LOCALAPPDATA%\AchievementBridge\bridge-cli.log`. `Ctrl+C` encerra o monitor
+Os logs ficam em `%LOCALAPPDATA%\AchievementBridge\bridge-cli.log` e `%LOCALAPPDATA%\AchievementBridge\bridge-api.log`. `Ctrl+C` encerra o monitor
 e volta ao menu. A CLI recusa iniciar uma segunda instância por padrão; feche o LuaTools antes de
 usá-la standalone.
 
@@ -100,7 +107,7 @@ AppID/API name está desbloqueado antes de escrever na Steam. Primeiro tenta `Se
 ## Instalador Windows
 
 O instalador é gerado com Velopack 1.2.0. A CLI Typer/Rich é congelada em uma pasta standalone pelo
-PyInstaller, portanto o computador do usuário não precisa ter Python, Zig ou .NET instalado. O setup
+PyInstaller, portanto o computador do usuário não precisa ter Python, Go, Zig ou .NET instalado. O setup
 é por usuário, cria atalhos no Menu Iniciar e na área de trabalho, registra um desinstalador e já usa o
 formato de releases necessário para atualizações futuras.
 
@@ -110,12 +117,12 @@ Para gerar uma release local a partir dos fontes:
 .\scripts\build-installer.ps1 -Version 0.1.0
 ```
 
-O script compila e testa o núcleo Zig em `ReleaseSafe`, gera o ícone, empacota a CLI e grava o setup,
+O script compila o núcleo Zig em `ReleaseSafe`, executa a suíte existente, compila o gateway Go, gera o ícone, empacota a CLI e grava o setup,
 o pacote completo e o feed Velopack em `dist`. Para reconstruir com binários Zig já existentes e
 limpar os artefatos de release anteriores:
 
 ```powershell
-.\scripts\build-installer.ps1 -Version 0.1.0 -SkipZigBuild -CleanReleases
+.\scripts\build-installer.ps1 -Version 0.1.0 -SkipZigBuild -SkipGoBuild -CleanReleases
 ```
 
 As ferramentas de build ficam fixadas em `requirements-build.txt` e `.config/dotnet-tools.json`.

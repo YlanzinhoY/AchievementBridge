@@ -32,5 +32,24 @@ if errorlevel 1 (
 )
 
 :run
+set "API_EXE=%~dp0zig-out\bin\achievement-bridge-api.exe"
+if not exist "%API_EXE%" (
+  where go >nul 2>nul
+  if errorlevel 1 (
+    echo O gateway do Achievement Bridge nao foi encontrado.
+    echo Instale Go 1.26 ou gere os binarios pelo instalador do projeto.
+    exit /b 1
+  )
+  echo Compilando o gateway local do Achievement Bridge...
+  if not exist "%~dp0zig-out\bin" mkdir "%~dp0zig-out\bin"
+  pushd "%~dp0api"
+  go build -o "%API_EXE%" ".\cmd\achievement-bridge-api"
+  if errorlevel 1 goto api_build_failed
+  popd
+)
 "%VENV_PY%" "%~dp0achievement_bridge_cli.py" %*
 exit /b %errorlevel%
+
+:api_build_failed
+popd
+exit /b 1
