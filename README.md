@@ -15,7 +15,7 @@ Os artefatos serão criados em `zig-out/bin/achievement-bridge.exe`, `zig-out/bi
 
 ## Arquitetura separada
 
-A interface Python cuida somente de entrada e apresentação. Catálogo, descoberta de jogos e simulação de toast são solicitados à API Go em `127.0.0.1:47650`. O gateway inicia e supervisiona o núcleo Zig persistente, comunicando-se com ele por JSON delimitado por linha em `127.0.0.1:47651`. Apenas o Zig conhece a ABI Steam e mantém a sessão ativa; o Go traduz o protocolo interno para HTTP/JSON e nenhum dos dois serviços aceita conexões fora do loopback.
+A interface Python cuida somente de entrada e apresentação. Catálogo, descoberta de jogos e simulação de toast são solicitados à API Go em `127.0.0.1:47650`. O gateway inicia e supervisiona o núcleo Zig persistente, comunicando-se com ele por JSON delimitado por linha em `127.0.0.1:47651`. Apenas o Zig conhece a ABI Steam e controla a sessão durante cada operação completa; o Go traduz o protocolo interno para HTTP/JSON e nenhum dos dois serviços aceita conexões fora do loopback.
 
 Essa divisão evita criar um novo processo Zig a cada clique e deixa uma futura GUI consumir a mesma API sem duplicar regras. O contrato e os limites de cada camada estão detalhados em [`docs/architecture.md`](docs/architecture.md).
 

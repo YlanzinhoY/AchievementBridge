@@ -38,7 +38,7 @@ The API contains no Steam vtable offsets, cache format logic or provider parsing
 
 ## Zig core
 
-The Zig executable remains the authority for Steam and achievement state. In `serve` mode it listens only on `127.0.0.1`, processes commands serially and keeps the current Steam session alive between requests. Serial execution prevents overlapping callback queues and `StoreStats` transactions.
+The Zig executable remains the authority for Steam and achievement state. In `serve` mode it listens only on `127.0.0.1` and processes commands serially. A Steam session lives for one complete operation, including every callback and rollback, then closes so Steam does not keep the queried AppID associated with the persistent process. Serial execution prevents overlapping callback queues and `StoreStats` transactions.
 
 Protocol v1 uses one UTF-8 JSON object per TCP connection, terminated by a newline. The core writes one response and closes the connection.
 

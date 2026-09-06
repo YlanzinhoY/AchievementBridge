@@ -38,7 +38,6 @@ const State = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     steam_root: ?[]u8,
-    session: ?bridge.steam.adapter.Session = null,
 
     fn init(allocator: std.mem.Allocator, io: std.Io, steam_root: ?[]const u8) !State {
         return .{
@@ -49,7 +48,6 @@ const State = struct {
     }
 
     fn deinit(self: *State) void {
-        if (self.session) |*session| session.close();
         if (self.steam_root) |root| self.allocator.free(root);
         self.* = undefined;
     }
@@ -60,14 +58,8 @@ const State = struct {
         return self.steam_root.?;
     }
 
-    fn getSession(self: *State, app_id: u32) !*bridge.steam.adapter.Session {
-        if (self.session) |*session| {
-            if (session.app_id == app_id) return session;
-            session.close();
-            self.session = null;
-        }
-        self.session = try bridge.steam.adapter.connect(self.allocator, app_id, try self.getSteamRoot());
-        return &self.session.?;
+    fn connectSession(self: *State, app_id: u32) !bridge.steam.adapter.Session {
+        return bridge.steam.adapter.connect(self.allocator, app_id, try self.getSteamRoot());
     }
 };
 
@@ -129,15 +121,16 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
             .service = "achievement-bridge-core",
             .status = "ready",
             .protocol_version = protocol_version,
-            .steam_session_app_id = if (state.session) |session| session.app_id else null,
+            .steam_session_scope = "request",
         });
         return;
     }
     if (std.mem.eql(u8, request.method, "list_achievements")) {
         const app_id = request.params.app_id orelse return error.MissingAppId;
-        const session = try state.getSession(app_id);
+        var session = try state.connectSession(app_id);
+        defer session.close();
         try session.client.loadCurrentUserStats(state.io, app_id, 10_000);
-        var achievements = try bridge.steam.adapter.listAchievements(session, allocator);
+        var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
         defer achievements.deinit();
         try writeSuccess(allocator, writer, request.id, .{
             .app_id = app_id,
@@ -167,9 +160,11 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
 
             var achievement_count: ?usize = null;
             if (request.params.verify_schema and supportsStandaloneSync(provider, confidence)) {
-                if (state.getSession(app.app_id)) |session| {
+                if (state.connectSession(app.app_id)) |connected| {
+                    var session = connected;
+                    defer session.close();
                     if (session.client.loadCurrentUserStats(state.io, app.app_id, 10_000)) |_| {
-                        if (bridge.steam.adapter.listAchievements(session, allocator)) |achievement_list| {
+                        if (bridge.steam.adapter.listAchievements(&session, allocator)) |achievement_list| {
                             var achievements = achievement_list;
                             achievement_count = achievements.items.items.len;
                             achievements.deinit();
@@ -199,13 +194,14 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
             while (!try gameRunning(game_dir)) try std.Io.sleep(state.io, .fromMilliseconds(500), .awake);
         }
 
-        const session = try state.getSession(app_id);
+        var session = try state.connectSession(app_id);
+        defer session.close();
         try session.client.loadCurrentUserStats(state.io, app_id, 5000);
-        var achievements = try bridge.steam.adapter.listAchievements(session, allocator);
+        var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
         defer achievements.deinit();
         const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
         if (achievement.unlocked) return error.AchievementAlreadyUnlockedForPreview;
-        try bridge.steam.adapter.previewAchievementUnlock(session, allocator, state.io, achievement.api_name, duration_ms);
+        try bridge.steam.adapter.previewAchievementUnlock(&session, allocator, state.io, achievement.api_name, duration_ms);
         try writeSuccess(allocator, writer, request.id, .{
             .app_id = app_id,
             .achievement = achievement.api_name,
