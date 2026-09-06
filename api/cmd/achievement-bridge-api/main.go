@@ -101,6 +101,7 @@ func main() {
 	mux.HandleFunc("GET /v1/games", app.listGames)
 	mux.HandleFunc("GET /v1/games/{app_id}/achievements", app.listAchievements)
 	mux.HandleFunc("POST /v1/achievement-previews", app.previewAchievement)
+	mux.HandleFunc("POST /v1/achievement-previews/rollback", app.rollbackAchievementPreview)
 
 	server := &http.Server{
 		Addr:              *apiAddress,
@@ -200,6 +201,32 @@ func (a *application) previewAchievement(writer http.ResponseWriter, request *ht
 	}
 	var result map[string]any
 	if err := a.core.Call(ctx, "preview_achievement", input, &result); err != nil {
+		writeCoreError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func (a *application) rollbackAchievementPreview(writer http.ResponseWriter, request *http.Request) {
+	var input previewRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 64*1024))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	input.Achievement = strings.TrimSpace(input.Achievement)
+	if input.AppID == 0 || input.Achievement == "" {
+		writeError(writer, http.StatusBadRequest, "invalid_request", "app_id and achievement are required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Minute)
+	defer cancel()
+	var result map[string]any
+	if err := a.core.Call(ctx, "rollback_achievement_preview", map[string]any{
+		"app_id":      input.AppID,
+		"achievement": input.Achievement,
+	}, &result); err != nil {
 		writeCoreError(writer, err)
 		return
 	}

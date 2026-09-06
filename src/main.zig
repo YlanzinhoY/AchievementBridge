@@ -40,9 +40,11 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (cli.command == .serve) {
+        const preview_transaction_path = try defaultPreviewTransactionPath(allocator, init.environ_map);
         try bridge.control.server.run(allocator, init.io, .{
             .port = cli.port,
             .steam_root = cli.steam_root,
+            .preview_transaction_path = preview_transaction_path,
         });
         return;
     }
@@ -902,6 +904,13 @@ fn defaultLocalStorePath(allocator: std.mem.Allocator, environ_map: *const std.p
         return std.fs.path.join(allocator, &.{ localappdata, "AchievementBridge", "local-achievements.json" });
     }
     return ".achievement-bridge/local-achievements.json";
+}
+
+fn defaultPreviewTransactionPath(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {
+    if (environ_map.get("LOCALAPPDATA")) |localappdata| {
+        return std.fs.path.join(allocator, &.{ localappdata, "AchievementBridge", "preview-transaction-v1.json" });
+    }
+    return ".achievement-bridge/preview-transaction-v1.json";
 }
 
 fn defaultR2ReplayGuardPath(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]const u8 {

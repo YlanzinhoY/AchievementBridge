@@ -148,6 +148,29 @@ pub fn previewAchievementUnlock(
         return error.AchievementPreviewRollbackUnconfirmed;
 }
 
+/// Completes a rollback that was left pending by an interrupted notification
+/// preview. Callers must scope this operation to an explicitly identified test
+/// achievement because clearing a legitimate unlock destroys its timestamp.
+pub fn rollbackAchievementPreview(
+    session: *Session,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    api_name: []const u8,
+) !bool {
+    if (api_name.len == 0 or api_name.len > 127 or std.mem.indexOfScalar(u8, api_name, 0) != null)
+        return error.InvalidAchievementApiName;
+    const api_name_z = try allocator.dupeZ(u8, api_name);
+    defer allocator.free(api_name_z);
+
+    try session.client.loadCurrentUserStats(io, session.app_id, 10_000);
+    if (!try session.client.user_stats.isAchievementUnlocked(api_name_z)) return false;
+    try rollbackPreviewAchievement(session, io, api_name_z);
+    try session.client.loadCurrentUserStats(io, session.app_id, 10_000);
+    if (try session.client.user_stats.isAchievementUnlocked(api_name_z))
+        return error.AchievementPreviewRollbackUnconfirmed;
+    return true;
+}
+
 fn rollbackPreviewAchievement(session: *Session, io: std.Io, api_name_z: [*:0]const u8) !void {
     if (!session.client.user_stats.clearAchievement(api_name_z))
         return error.ClearAchievementFailed;

@@ -39,6 +39,7 @@ pub const steam = struct {
     pub const user_stats = @import("steam/user_stats.zig");
     pub const vtable = @import("steam/vtable.zig");
     pub const metadata = @import("steam/metadata.zig");
+    pub const preview_transaction = @import("steam/preview_transaction.zig");
     pub const schema = @import("steam/schema.zig");
 };
 pub const gse = struct {

@@ -7,6 +7,7 @@ pub const default_port: u16 = 47_651;
 pub const Options = struct {
     port: u16 = default_port,
     steam_root: ?[]const u8 = null,
+    preview_transaction_path: []const u8,
 };
 
 const Request = struct {
@@ -38,17 +39,25 @@ const State = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     steam_root: ?[]u8,
+    preview_transaction_path: []u8,
 
-    fn init(allocator: std.mem.Allocator, io: std.Io, steam_root: ?[]const u8) !State {
+    fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        steam_root: ?[]const u8,
+        preview_transaction_path: []const u8,
+    ) !State {
         return .{
             .allocator = allocator,
             .io = io,
             .steam_root = if (steam_root) |root| try allocator.dupe(u8, root) else null,
+            .preview_transaction_path = try allocator.dupe(u8, preview_transaction_path),
         };
     }
 
     fn deinit(self: *State) void {
         if (self.steam_root) |root| self.allocator.free(root);
+        self.allocator.free(self.preview_transaction_path);
         self.* = undefined;
     }
 
@@ -61,10 +70,32 @@ const State = struct {
     fn connectSession(self: *State, app_id: u32) !bridge.steam.adapter.Session {
         return bridge.steam.adapter.connect(self.allocator, app_id, try self.getSteamRoot());
     }
+
+    fn recoverPendingPreview(self: *State) !void {
+        var pending = (try bridge.steam.preview_transaction.load(
+            self.allocator,
+            self.io,
+            self.preview_transaction_path,
+        )) orelse return;
+        defer pending.deinit();
+        var session = try self.connectSession(pending.app_id);
+        defer session.close();
+        const cleared = try bridge.steam.adapter.rollbackAchievementPreview(
+            &session,
+            self.allocator,
+            self.io,
+            pending.achievement,
+        );
+        try bridge.steam.preview_transaction.clear(self.io, self.preview_transaction_path);
+        std.debug.print(
+            "[SteamNotificationPreview] recovery=true appid={d} achievement={s} cleared={} state_after=locked\n",
+            .{ pending.app_id, pending.achievement, cleared },
+        );
+    }
 };
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
-    var state = try State.init(allocator, io, options.steam_root);
+    var state = try State.init(allocator, io, options.steam_root, options.preview_transaction_path);
     defer state.deinit();
 
     const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", options.port);
@@ -74,6 +105,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         "[AchievementBridgeCore] status=ready address=127.0.0.1 port={d} protocol={d}\n",
         .{ options.port, protocol_version },
     );
+    state.recoverPendingPreview() catch |err|
+        std.debug.print("[SteamNotificationPreview] recovery_pending=true error={s}\n", .{@errorName(err)});
 
     while (true) {
         var stream = server.accept(io) catch |err| {
@@ -186,6 +219,7 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         return;
     }
     if (std.mem.eql(u8, request.method, "preview_achievement")) {
+        try state.recoverPendingPreview();
         const app_id = request.params.app_id orelse return error.MissingAppId;
         const wanted = request.params.achievement orelse return error.MissingAchievement;
         const duration_ms = request.params.duration_ms orelse 7000;
@@ -201,7 +235,16 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         defer achievements.deinit();
         const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
         if (achievement.unlocked) return error.AchievementAlreadyUnlockedForPreview;
+        try bridge.steam.preview_transaction.save(
+            allocator,
+            state.io,
+            state.preview_transaction_path,
+            app_id,
+            achievement.api_name,
+            unixNow(state.io),
+        );
         try bridge.steam.adapter.previewAchievementUnlock(&session, allocator, state.io, achievement.api_name, duration_ms);
+        try bridge.steam.preview_transaction.clear(state.io, state.preview_transaction_path);
         try writeSuccess(allocator, writer, request.id, .{
             .app_id = app_id,
             .achievement = achievement.api_name,
@@ -209,6 +252,36 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
             .native_unlock_toast = true,
             .temporary_unlock_stored = true,
             .rollback_stored = true,
+            .state_after = "locked",
+        });
+        return;
+    }
+    if (std.mem.eql(u8, request.method, "rollback_achievement_preview")) {
+        const app_id = request.params.app_id orelse return error.MissingAppId;
+        const wanted = request.params.achievement orelse return error.MissingAchievement;
+        var session = try state.connectSession(app_id);
+        defer session.close();
+        try session.client.loadCurrentUserStats(state.io, app_id, 10_000);
+        var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
+        defer achievements.deinit();
+        const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
+        const cleared = try bridge.steam.adapter.rollbackAchievementPreview(
+            &session,
+            allocator,
+            state.io,
+            achievement.api_name,
+        );
+        if (try bridge.steam.preview_transaction.load(allocator, state.io, state.preview_transaction_path)) |loaded| {
+            var pending = loaded;
+            defer pending.deinit();
+            if (pending.app_id == app_id and std.ascii.eqlIgnoreCase(pending.achievement, achievement.api_name))
+                try bridge.steam.preview_transaction.clear(state.io, state.preview_transaction_path);
+        }
+        try writeSuccess(allocator, writer, request.id, .{
+            .app_id = app_id,
+            .achievement = achievement.api_name,
+            .name = achievement.name,
+            .rollback_stored = cleared,
             .state_after = "locked",
         });
         return;
@@ -304,4 +377,8 @@ fn gameRunning(game_dir: []const u8) !bool {
         if (boundary == '\\' or boundary == '/') return true;
     }
     return false;
+}
+
+fn unixNow(io: std.Io) i64 {
+    return @intCast(@divTrunc(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
 }
