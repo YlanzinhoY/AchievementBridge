@@ -67,6 +67,26 @@ class ApiClientTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             cli.notification_preview_arguments(2638890, " ", None)
 
+    @patch("achievement_bridge_cli.os.getpid", return_value=4242)
+    def test_api_process_is_bound_to_cli_lifetime(self, _: MagicMock) -> None:
+        arguments = cli.api_start_arguments(
+            Path("achievement-bridge-api.exe"),
+            Path("achievement-bridge.exe"),
+            r"C:\Program Files (x86)\Steam",
+        )
+        self.assertEqual(
+            [
+                "achievement-bridge-api.exe",
+                "--core",
+                "achievement-bridge.exe",
+                "--parent-pid",
+                "4242",
+                "--steam-root",
+                r"C:\Program Files (x86)\Steam",
+            ],
+            arguments,
+        )
+
 
 class ConfigurationTests(unittest.TestCase):
     def test_opensteamtool_preserves_other_sections(self) -> None:
