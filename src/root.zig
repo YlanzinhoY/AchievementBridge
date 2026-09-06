@@ -3,6 +3,7 @@ pub const journal = @import("core/journal.zig");
 pub const session = @import("core/session.zig");
 pub const metadata = @import("core/metadata.zig");
 pub const mapper = @import("core/mapper.zig");
+pub const game_support = @import("support/game_manifest.zig");
 pub const catalog = @import("catalog.zig");
 pub const provider = @import("providers/provider.zig");
 pub const detector = struct {
@@ -86,6 +87,7 @@ test {
     _ = session;
     _ = metadata;
     _ = mapper;
+    _ = game_support;
     _ = catalog;
     _ = provider;
     _ = detector.runtime;
