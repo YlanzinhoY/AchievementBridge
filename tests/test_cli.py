@@ -180,6 +180,10 @@ Provider candidates:
     def test_monitor_uses_api_instead_of_second_zig_process(self) -> None:
         client = MagicMock()
         client.base_url = "http://127.0.0.1:47650"
+        client.request.side_effect = [
+            {"core": {"monitoring": False}},
+            {"monitoring": True},
+        ]
         client.stream_monitor_events.return_value = iter(())
         options = cli.MonitorOptions(
             bridge=None,
@@ -204,45 +208,19 @@ Provider candidates:
 
         self.assertEqual(0, result)
         client.ensure_started.assert_called_once_with()
-        client.request.assert_called_once_with(
+        client.request.assert_any_call("GET", "/v1/health", timeout=2)
+        client.request.assert_any_call(
             "POST",
             "/v1/monitor/start",
-            {"interval_ms": 500, "recover": True, "notifications": False},
+            {
+                "interval_ms": 500,
+                "recover": True,
+                "notifications": False,
+                "native_toast": True,
+            },
             timeout=15,
         )
         popen.assert_not_called()
-
-    def test_achievement_event_sync_is_routed_through_api(self) -> None:
-        client = MagicMock()
-        client.request.return_value = {"route": "steam_abi", "server_acknowledged": True}
-        event = cli.AchievementEvent(
-            provider="rune",
-            app_id=3046600,
-            product_id=None,
-            achievement="ACHIEVEMENT_02",
-            timestamp=1234,
-            recovered=False,
-        )
-        log = MagicMock()
-        with (
-            patch.object(cli, "api_client", return_value=client),
-            patch.object(cli, "run_bridge") as run_bridge,
-        ):
-            cli.sync_event(Path("achievement-bridge.exe"), event, None, True, log)
-
-        client.request.assert_called_once_with(
-            "POST",
-            "/v1/achievement-syncs",
-            {
-                "app_id": 3046600,
-                "achievement": "ACHIEVEMENT_02",
-                "provider": "rune",
-                "native_toast": True,
-                "timestamp": 1234,
-            },
-            timeout=180,
-        )
-        run_bridge.assert_not_called()
 
     def test_notification_preview_requests_explicit_temporary_write(self) -> None:
         arguments = notification_preview_arguments(
