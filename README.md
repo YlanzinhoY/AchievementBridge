@@ -108,25 +108,29 @@ Para opcionalmente aguardar um jogo abrir antes da transação:
 ## Rockstar Social Club
 
 O detector reconhece instalações Rockstar oficiais e compatíveis, incluindo jogos com
-`socialclub.dll`, `title.rgl`, `socialclub_emu.ini` ou `RUNE64.dll`. O provider procura estados locais
+`socialclub.dll`, `title.rgl`, `socialclub_emu.ini` ou `RUNE64.dll`. O provider comum procura estados locais
 de conquistas nos perfis do Social Club e nos diretórios públicos usados por emuladores. A associação
 ao AppID compara dinamicamente o título e a pasta do perfil com toda a biblioteca Steam instalada;
-aliases conhecidos existem apenas como fallback. O provider só emite uma conquista após reler uma evidência local
-verificável. Além de campos explícitos em JSON ou INI, o GTA V Enhanced possui um adaptador conservador para o
-cabeçalho público dos saves `SGTA*`: progresso igual ou superior a 1,6% comprova `ACH00` (fim de "Franklin e
-Lamar") sem tentar decodificar ou alterar o restante do save.
+aliases conhecidos existem apenas como fallback. Jogos que não publicam esse estado em arquivo podem ter um
+adaptador isolado em `src/providers/rockstar/games`, sem colocar regras específicas no núcleo do provider.
+
+O GTA V Enhanced possui o primeiro desses adaptadores. Enquanto `GTA5_Enhanced.exe` está aberto, ele localiza
+por assinatura a rotina `HAS_ACHIEVEMENT_BEEN_PASSED`, lê passivamente a lista viva do Social Club e mapeia os
+77 IDs de PC para seus API names Steam. Nenhum endereço absoluto é fixado, nenhum código é injetado e a memória
+do jogo nunca é alterada. A primeira leitura vira baseline; somente um ID acrescentado depois disso produz evento
+e sincronização. Como fallback para um jogo fechado, o cabeçalho público dos saves `SGTA*` ainda comprova `ACH00`
+quando o progresso é igual ou superior a 1,6%.
 
 O catálogo, os nomes e as imagens continuam vindo da Steam. Se o runtime for detectado, mas o perfil
 só contiver blobs proprietários como `cfg.dat`, `pc_settings.bin` ou um `achievements.dat` não
 decodificável, a CLI mostra `AGUARDA DADOS`: as conquistas podem ser consultadas e usadas no simulador,
-mas o Bridge não adivinha nem envia desbloqueios. Assim que um estado legível aparecer, o watcher cria
-o baseline e passa a sincronizar apenas transições novas de bloqueada para desbloqueada. O adaptador `SGTA*`
-atualmente prova somente o primeiro marco de história; as demais conquistas do GTA continuam bloqueadas até que
-exista evidência específica no estado local.
+mas o Bridge não adivinha nem envia desbloqueios. Assim que um estado legível ou um adaptador do título estiver
+disponível, o watcher cria o baseline e passa a sincronizar apenas transições novas de bloqueada para desbloqueada.
 
-Quando uma conquista GSE/RUNE/Rockstar é emitida, a CLI relê o arquivo do provider e comprova que o mesmo
-AppID/API name está desbloqueado antes de escrever na Steam. Primeiro tenta `SetAchievement` +
-`StoreStats`; schemas protegidos usam o cache local nativo como fallback, com backup atômico.
+Quando uma conquista GSE/RUNE/Rockstar é emitida, a API comprova novamente a mesma evidência que originou o
+evento — arquivo do provider ou estado vivo do adaptador — para o mesmo AppID/API name antes de escrever na
+Steam. Primeiro tenta `SetAchievement` + `StoreStats`; schemas protegidos usam o cache local nativo como
+fallback, com backup atômico.
 
 ## Instalador Windows
 
