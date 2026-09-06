@@ -50,6 +50,18 @@ pub const rune = Descriptor{
     },
 };
 
+pub const rockstar = Descriptor{
+    .kind = .rockstar,
+    .name = "Rockstar Social Club",
+    .version = "0.1.5",
+    .capabilities = .{
+        .realtime_events = true,
+        .snapshots = true,
+        .timestamps = true,
+        .metadata = true,
+    },
+};
+
 pub const ubisoft = Descriptor{
     .kind = .ubisoft,
     .name = "Ubisoft Connect",

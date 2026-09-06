@@ -15,6 +15,7 @@ pub const MonitorDefaults = struct {
     gse_roots: []const []const u8,
     r2_roots: []const []const u8,
     rune_roots: []const []const u8,
+    rockstar_roots: []const []const u8,
     spool_root: []const u8,
     journal_path: []const u8,
     replay_guard_path: []const u8,
@@ -50,6 +51,7 @@ const GameSupport = struct {
     provider: []const u8,
     confidence: u8,
     achievement_count: ?usize,
+    state_available: bool,
     status: []const u8,
 };
 
@@ -124,6 +126,7 @@ const State = struct {
             .gse_roots = self.monitor.gse_roots,
             .r2_roots = self.monitor.r2_roots,
             .rune_roots = self.monitor.rune_roots,
+            .rockstar_roots = self.monitor.rockstar_roots,
             .spool_root = self.monitor.spool_root,
             .journal_path = if (params.journal_path) |path|
                 try self.allocator.dupe(u8, path)
@@ -236,6 +239,12 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         const steam_root = try state.getSteamRoot();
         var catalog = try bridge.detector.steam_install.discover(allocator, state.io, steam_root);
         defer catalog.deinit();
+        var rockstar_candidates = try bridge.providers.rockstar.discovery.discover(
+            allocator,
+            state.io,
+            state.monitor.rockstar_roots,
+        );
+        defer rockstar_candidates.deinit();
         var games: std.ArrayList(GameSupport) = .empty;
         defer games.deinit(allocator);
         for (catalog.apps.items) |app| {
@@ -252,6 +261,8 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
                 }
             } else |_| {}
 
+            const state_available = !std.mem.eql(u8, provider, "rockstar") or
+                hasRockstarState(rockstar_candidates.items.items, app.app_id);
             var achievement_count: ?usize = null;
             if (request.params.verify_schema and supportsStandaloneSync(provider, confidence)) {
                 if (state.connectSession(app.app_id)) |connected| {
@@ -273,7 +284,8 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
                 .provider = provider,
                 .confidence = confidence,
                 .achievement_count = achievement_count,
-                .status = classifySupport(provider, confidence, achievement_count),
+                .state_available = state_available,
+                .status = classifySupport(provider, confidence, achievement_count, state_available),
             });
         }
         try writeSuccess(allocator, writer, request.id, .{ .games = games.items });
@@ -355,6 +367,8 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
             try verifyGseUnlock(state, allocator, app_id, wanted);
         } else if (std.mem.eql(u8, provider, "rune")) {
             try verifyRuneUnlock(state, allocator, app_id, wanted);
+        } else if (std.mem.eql(u8, provider, "rockstar")) {
+            try verifyRockstarUnlock(state, allocator, app_id, wanted);
         } else {
             return error.UnsupportedSyncProvider;
         }
@@ -470,7 +484,7 @@ fn numericSuffix(api_name: []const u8) ?[]const u8 {
 
 fn selectProvider(candidates: []const bridge.resolver.Candidate) ?bridge.resolver.Candidate {
     const priority = [_]bridge.event.ProviderKind{
-        .gse, .rune, .uplay_r2, .ubisoft, .steam, .epic, .gog, .ea, .xbox,
+        .gse, .rune, .rockstar, .uplay_r2, .ubisoft, .steam, .epic, .gog, .ea, .xbox,
     };
     for (priority) |wanted| {
         for (candidates) |candidate| if (candidate.provider == wanted) return candidate;
@@ -480,11 +494,13 @@ fn selectProvider(candidates: []const bridge.resolver.Candidate) ?bridge.resolve
 
 fn supportsStandaloneSync(provider: []const u8, confidence: u8) bool {
     return confidence >= 60 and
-        (std.mem.eql(u8, provider, "gse") or std.mem.eql(u8, provider, "rune"));
+        (std.mem.eql(u8, provider, "gse") or std.mem.eql(u8, provider, "rune") or
+            std.mem.eql(u8, provider, "rockstar"));
 }
 
-fn classifySupport(provider: []const u8, confidence: u8, achievement_count: ?usize) []const u8 {
+fn classifySupport(provider: []const u8, confidence: u8, achievement_count: ?usize, state_available: bool) []const u8 {
     if (supportsStandaloneSync(provider, confidence)) {
+        if (std.mem.eql(u8, provider, "rockstar") and !state_available) return "AGUARDA DADOS";
         if (achievement_count) |count| if (count == 0) return "SEM CATÁLOGO";
         return "COMPLETO";
     }
@@ -493,6 +509,11 @@ fn classifySupport(provider: []const u8, confidence: u8, achievement_count: ?usi
         return "SÓ DETECTA";
     if (confidence >= 50 and std.mem.eql(u8, provider, "steam")) return "NATIVO";
     return "SEM SUPORTE";
+}
+
+fn hasRockstarState(candidates: []const bridge.providers.rockstar.discovery.Candidate, app_id: u32) bool {
+    for (candidates) |candidate| if (candidate.app_id == app_id) return true;
+    return false;
 }
 
 fn gameRunning(game_dir: []const u8) !bool {
@@ -540,6 +561,24 @@ fn verifyRuneUnlock(state: *State, allocator: std.mem.Allocator, app_id: u32, ap
     return error.RuneAppNotFound;
 }
 
+fn verifyRockstarUnlock(state: *State, allocator: std.mem.Allocator, app_id: u32, api_name: []const u8) !void {
+    var candidates = try bridge.providers.rockstar.discovery.discover(allocator, state.io, state.monitor.rockstar_roots);
+    defer candidates.deinit();
+    var found_locked = false;
+    for (candidates.items.items) |candidate| {
+        if (candidate.app_id != app_id) continue;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(state.io, candidate.state_file, allocator, .limited(16 * 1024 * 1024));
+        defer allocator.free(bytes);
+        var snapshot = try bridge.providers.rockstar.snapshot.parse(allocator, bytes);
+        defer snapshot.deinit();
+        const achievement = snapshot.achievements.get(api_name) orelse continue;
+        if (achievement.earned) return;
+        found_locked = true;
+    }
+    if (found_locked) return error.RockstarAchievementNotUnlocked;
+    return error.RockstarAchievementNotFound;
+}
+
 fn unixNow(io: std.Io) i64 {
     return @intCast(@divTrunc(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
 }
@@ -550,9 +589,11 @@ fn monitorWorker(context: *const bridge.host.all_watchers.Context) void {
 }
 
 test "support classification distinguishes native, full, and detected providers" {
-    try std.testing.expectEqualStrings("COMPLETO", classifySupport("gse", 100, 52));
-    try std.testing.expectEqualStrings("SEM CATÁLOGO", classifySupport("rune", 90, 0));
-    try std.testing.expectEqualStrings("SÓ DETECTA", classifySupport("ubisoft", 90, null));
-    try std.testing.expectEqualStrings("NATIVO", classifySupport("steam", 75, null));
-    try std.testing.expectEqualStrings("SEM SUPORTE", classifySupport("epic", 85, null));
+    try std.testing.expectEqualStrings("COMPLETO", classifySupport("gse", 100, 52, true));
+    try std.testing.expectEqualStrings("COMPLETO", classifySupport("rockstar", 100, 77, true));
+    try std.testing.expectEqualStrings("AGUARDA DADOS", classifySupport("rockstar", 100, 77, false));
+    try std.testing.expectEqualStrings("SEM CATÁLOGO", classifySupport("rune", 90, 0, true));
+    try std.testing.expectEqualStrings("SÓ DETECTA", classifySupport("ubisoft", 90, null, true));
+    try std.testing.expectEqualStrings("NATIVO", classifySupport("steam", 75, null, true));
+    try std.testing.expectEqualStrings("SEM SUPORTE", classifySupport("epic", 85, null, true));
 }

@@ -56,6 +56,11 @@ pub const providers = struct {
         pub const discovery = @import("providers/rune/discovery.zig");
         pub const watcher = @import("providers/rune/watcher.zig");
     };
+    pub const rockstar = struct {
+        pub const snapshot = @import("providers/rockstar/snapshot.zig");
+        pub const discovery = @import("providers/rockstar/discovery.zig");
+        pub const watcher = @import("providers/rockstar/watcher.zig");
+    };
     pub const steam = struct {
         pub const watcher = @import("providers/steam/watcher.zig");
     };
@@ -114,4 +119,7 @@ test {
     _ = providers.rune.snapshot;
     _ = providers.rune.discovery;
     _ = providers.rune.watcher;
+    _ = providers.rockstar.snapshot;
+    _ = providers.rockstar.discovery;
+    _ = providers.rockstar.watcher;
 }

@@ -6,6 +6,7 @@ pub const Context = struct {
     gse_roots: []const []const u8,
     r2_roots: []const []const u8,
     rune_roots: []const []const u8,
+    rockstar_roots: []const []const u8,
     spool_root: []const u8,
     journal_path: []const u8,
     replay_guard_path: []const u8,
@@ -15,17 +16,35 @@ pub const Context = struct {
 };
 
 pub fn run(context: *const Context) !void {
-    std.debug.print("[AchievementBridge] mode=watch-all providers=gse,rune,ubisoft,uplay_r2 sessions=enabled\n", .{});
+    std.debug.print("[AchievementBridge] mode=watch-all providers=gse,rune,rockstar,ubisoft,uplay_r2 sessions=enabled\n", .{});
     const session_thread = try std.Thread.spawn(.{}, watchSessionWorker, .{context});
     const gse_thread = try std.Thread.spawn(.{}, watchGseWorker, .{context});
     const rune_thread = try std.Thread.spawn(.{}, watchRuneWorker, .{context});
+    const rockstar_thread = try std.Thread.spawn(.{}, watchRockstarWorker, .{context});
     const ubisoft_thread = try std.Thread.spawn(.{}, watchUbisoftWorker, .{context});
     const r2_thread = try std.Thread.spawn(.{}, watchR2Worker, .{context});
     session_thread.join();
     gse_thread.join();
     rune_thread.join();
+    rockstar_thread.join();
     ubisoft_thread.join();
     r2_thread.join();
+}
+
+fn watchRockstarWorker(context: *const Context) void {
+    while (true) {
+        bridge.providers.rockstar.watcher.run(std.heap.smp_allocator, context.io, .{
+            .roots = context.rockstar_roots,
+            .journal_path = context.journal_path,
+            .interval_ms = context.interval_ms,
+            .recover = context.recover,
+            .notifications = context.notifications,
+            .steam_root = null,
+        }) catch |err| {
+            std.debug.print("[AchievementBridge] provider=rockstar restart_reason={s}\n", .{@errorName(err)});
+            std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
+        };
+    }
 }
 
 fn watchSessionWorker(context: *const Context) void {

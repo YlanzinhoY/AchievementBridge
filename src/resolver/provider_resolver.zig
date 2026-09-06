@@ -18,6 +18,7 @@ pub fn resolve(
             .steamworks => .steam,
             .gse_compatible => .gse,
             .rune_compatible => .rune,
+            .rockstar_social_club => .rockstar,
             .ubisoft_connect => .ubisoft,
             .uplay_r2 => .uplay_r2,
             .epic_eos => .epic,

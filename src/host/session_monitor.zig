@@ -86,7 +86,7 @@ pub const Monitor = struct {
             });
             try hosted.session.transition(.loading_providers);
             for (hosted.session.providers.items) |*provider| provider.active = switch (provider.kind) {
-                .gse, .rune, .steam, .ubisoft, .uplay_r2 => true,
+                .gse, .rune, .rockstar, .steam, .ubisoft, .uplay_r2 => true,
                 .epic, .gog, .ea, .xbox => false,
             };
             try hosted.session.transition(.watching);

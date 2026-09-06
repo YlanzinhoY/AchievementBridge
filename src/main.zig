@@ -54,6 +54,8 @@ pub fn main(init: std.process.Init) !void {
             try std.fs.path.join(allocator, &.{ appdata, "Goldberg UplayEmu Saves" }),
         };
         const rune_roots = &[_][]const u8{try defaultRuneRoot(allocator, init.environ_map)};
+        var rockstar_roots: std.ArrayList([]const u8) = .empty;
+        try addDefaultRockstarRoots(allocator, init.environ_map, &rockstar_roots);
         const spool_root = try std.fs.path.join(allocator, &.{ localappdata, "Ubisoft Game Launcher", "spool" });
         try bridge.control.server.run(allocator, init.io, .{
             .port = cli.port,
@@ -63,6 +65,7 @@ pub fn main(init: std.process.Init) !void {
                 .gse_roots = gse_roots,
                 .r2_roots = r2_roots,
                 .rune_roots = rune_roots,
+                .rockstar_roots = rockstar_roots.items,
                 .spool_root = spool_root,
                 .journal_path = journal_path,
                 .replay_guard_path = replay_guard_path,
@@ -292,12 +295,15 @@ pub fn main(init: std.process.Init) !void {
             try std.fs.path.join(allocator, &.{ appdata, "Goldberg UplayEmu Saves" }),
         };
         const rune_roots = &[_][]const u8{try defaultRuneRoot(allocator, init.environ_map)};
+        var rockstar_roots: std.ArrayList([]const u8) = .empty;
+        try addDefaultRockstarRoots(allocator, init.environ_map, &rockstar_roots);
         const spool_root = try std.fs.path.join(allocator, &.{ localappdata, "Ubisoft Game Launcher", "spool" });
         const context = bridge.host.all_watchers.Context{
             .io = init.io,
             .gse_roots = gse_roots,
             .r2_roots = r2_roots,
             .rune_roots = rune_roots,
+            .rockstar_roots = rockstar_roots.items,
             .spool_root = spool_root,
             .journal_path = journal_path,
             .replay_guard_path = replay_guard_path,
@@ -773,6 +779,25 @@ fn defaultRuneRoot(allocator: std.mem.Allocator, environ_map: *const std.process
         return std.fs.path.join(allocator, &.{ drive, "Users", "Public", "Documents", "Steam", "RUNE" });
     }
     return error.MissingPublicProfile;
+}
+
+fn addDefaultRockstarRoots(
+    allocator: std.mem.Allocator,
+    environ_map: *const std.process.Environ.Map,
+    roots: *std.ArrayList([]const u8),
+) !void {
+    if (environ_map.get("PUBLIC")) |public| {
+        try roots.append(allocator, try std.fs.path.join(allocator, &.{ public, "Documents", "Socialclub" }));
+    } else if (environ_map.get("SystemDrive")) |drive| {
+        try roots.append(allocator, try std.fs.path.join(allocator, &.{ drive, "Users", "Public", "Documents", "Socialclub" }));
+    }
+    if (environ_map.get("APPDATA")) |appdata| {
+        try roots.append(allocator, try std.fs.path.join(allocator, &.{ appdata, "Goldberg SocialClub Emu Saves" }));
+    }
+    if (environ_map.get("USERPROFILE")) |profile| {
+        try roots.append(allocator, try std.fs.path.join(allocator, &.{ profile, "Documents", "Rockstar Games", "Social Club" }));
+    }
+    if (roots.items.len == 0) return error.MissingRockstarProfileRoot;
 }
 
 fn addDefaultGseRoots(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map, roots: *std.ArrayList([]const u8)) !void {
