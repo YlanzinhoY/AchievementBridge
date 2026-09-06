@@ -35,9 +35,9 @@ except ImportError:  # pragma: no cover - the packaged application is Windows-on
     winreg = None  # type: ignore[assignment]
 
 
-SUPPORTED_SYNC_PROVIDERS = ("gse", "rune")
+SUPPORTED_SYNC_PROVIDERS = ("gse", "rune", "rockstar")
 MONITORED_PROVIDERS = ("ubisoft", "uplay_r2")
-PROVIDER_PRIORITY = ("gse", "rune", "uplay_r2", "ubisoft", "steam", "epic", "gog", "ea", "xbox")
+PROVIDER_PRIORITY = ("gse", "rune", "rockstar", "uplay_r2", "ubisoft", "steam", "epic", "gog", "ea", "xbox")
 DEFAULT_NOTIFICATION_PREVIEW_MS = 7000
 MIN_NOTIFICATION_PREVIEW_MS = 1000
 MAX_NOTIFICATION_PREVIEW_MS = 60_000
@@ -62,6 +62,7 @@ class SupportReport:
     confidence: int
     achievement_count: int | None
     status: str
+    state_available: bool = True
 
 
 @dataclass(frozen=True)
@@ -616,8 +617,15 @@ def parse_available_achievements(output: str) -> list[AvailableAchievement]:
     return achievements
 
 
-def classify_support(provider: str, confidence: int, achievements: int | None) -> str:
+def classify_support(
+    provider: str,
+    confidence: int,
+    achievements: int | None,
+    state_available: bool = True,
+) -> str:
     if provider in SUPPORTED_SYNC_PROVIDERS and confidence >= 60:
+        if provider == "rockstar" and not state_available:
+            return "AGUARDA DADOS"
         return "COMPLETO" if achievements is None or achievements > 0 else "SEM CATÁLOGO"
     if provider in MONITORED_PROVIDERS and confidence >= 60:
         return "SÓ DETECTA"
@@ -675,6 +683,7 @@ def inspect_installed_games(bridge: Path, steam_root: str | None, verify_schema:
                 else None
             ),
             status=str(item["status"]),
+            state_available=bool(item.get("state_available", True)),
         )
         for item in raw_games
         if isinstance(item, dict)
@@ -693,6 +702,7 @@ def print_game_table(reports: list[SupportReport]) -> None:
         "COMPLETO": "bold green",
         "NATIVO": "cyan",
         "SÓ DETECTA": "yellow",
+        "AGUARDA DADOS": "yellow",
         "SEM CATÁLOGO": "yellow",
         "SEM SUPORTE": "red",
     }
@@ -709,6 +719,7 @@ def print_game_table(reports: list[SupportReport]) -> None:
     console.print("[bold green]COMPLETO[/]  Bridge detecta e sincroniza com a Steam")
     console.print("[cyan]NATIVO[/]    O próprio jogo usa Steamworks; não precisa do Bridge")
     console.print("[yellow]SÓ DETECTA[/] O Bridge vê o evento, mas a CLI ainda não sincroniza sozinha")
+    console.print("[yellow]AGUARDA DADOS[/] Rockstar detectado; aguardando um estado local de conquistas legível")
     console.print("[yellow]SEM CATÁLOGO[/] O provedor existe, mas a Steam não retornou conquistas")
     console.print("[red]SEM SUPORTE[/] Provedor de conquistas ainda não implementado")
 
@@ -836,7 +847,7 @@ def show_available_achievements(args: CliOptions, bridge: Path) -> None:
     reports = inspect_installed_games(bridge, args.steam_root, verify_schema=False)
     eligible = [
         report for report in reports
-        if report.status in {"COMPLETO", "NATIVO", "SÓ DETECTA"}
+        if report.status in {"COMPLETO", "NATIVO", "SÓ DETECTA", "AGUARDA DADOS"}
     ]
     if not eligible:
         console.print(Panel("Nenhum jogo compatível foi encontrado.", border_style="yellow"))
@@ -879,7 +890,7 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
     reports = inspect_installed_games(bridge, args.steam_root, verify_schema=False)
     eligible = [
         report for report in reports
-        if report.status in {"COMPLETO", "NATIVO", "SÓ DETECTA"}
+        if report.status in {"COMPLETO", "NATIVO", "SÓ DETECTA", "AGUARDA DADOS"}
     ]
     if not eligible:
         console.print(Panel("Nenhum jogo compatível foi encontrado.", border_style="yellow"))

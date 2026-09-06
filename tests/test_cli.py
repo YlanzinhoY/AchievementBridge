@@ -110,6 +110,8 @@ Provider candidates:
         self.assertEqual("NATIVO", classify_support("steam", 75, None))
         self.assertEqual("SEM SUPORTE", classify_support("epic", 85, None))
         self.assertEqual("SÓ DETECTA", classify_support("ubisoft", 90, None))
+        self.assertEqual("AGUARDA DADOS", classify_support("rockstar", 100, 77, False))
+        self.assertEqual("COMPLETO", classify_support("rockstar", 100, 77, True))
 
     def test_reads_steam_schema_count(self) -> None:
         self.assertEqual(52, parse_achievement_count("[SteamAdapter] connected=true appid=2638890 achievements=52"))

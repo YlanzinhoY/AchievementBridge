@@ -1,8 +1,8 @@
 # Achievement Bridge
 
-Bridge de conquistas Windows-only com núcleo em Zig 0.16.0, API local em Go e interface Typer/Rich em Python. Ele detecta jogos e runtimes, acompanha conquistas locais de GSE/Goldberg, RUNE, Steam, Ubisoft Connect e Uplay R2-compatible, normaliza os eventos, mantém um journal resiliente e mostra notificações nativas do Windows.
+Bridge de conquistas Windows-only com núcleo em Zig 0.16.0, API local em Go e interface Typer/Rich em Python. Ele detecta jogos e runtimes, acompanha conquistas locais de GSE/Goldberg, RUNE, Rockstar Social Club, Steam, Ubisoft Connect e Uplay R2-compatible, normaliza os eventos, mantém um journal resiliente e mostra notificações nativas do Windows.
 
-O acesso direto ao `ISteamUserStats` é somente leitura por padrão. As exceções de escrita são o comando manual `steam-unlock`, o simulador transacional de toast e os syncs GSE/RUNE verificados. O simulador e o desbloqueio manual exigem `--confirm-steam-write`; os syncs só prosseguem após reler o save e comprovar o desbloqueio para o mesmo AppID/API name. Separadamente, a integração LuaTools e a CLI standalone sincronizam cada evento real do provider com o cache local da Steam como fallback. Uma tentativa opt-in de toast de progresso do Steam Overlay também está disponível como experimento e é descrita abaixo.
+O acesso direto ao `ISteamUserStats` é somente leitura por padrão. As exceções de escrita são o comando manual `steam-unlock`, o simulador transacional de toast e os syncs GSE/RUNE/Rockstar verificados. O simulador e o desbloqueio manual exigem `--confirm-steam-write`; os syncs só prosseguem após reler o save e comprovar o desbloqueio para o mesmo AppID/API name. Separadamente, a integração LuaTools e a CLI standalone sincronizam cada evento real do provider com o cache local da Steam como fallback. Uma tentativa opt-in de toast de progresso do Steam Overlay também está disponível como experimento e é descrita abaixo.
 
 ## Compilar
 
@@ -25,7 +25,7 @@ Quando a CLI inicia esse par, a API acompanha o processo da interface e encerra 
 
 `achievement_bridge_cli.py` é uma interface standalone em Python 3.10+, construída com Typer e Rich.
 Ela inicia o gateway Go quando necessário, mantém os logs visíveis e persistentes, informa qual jogo está ativo, exibe
-a compatibilidade calculada pelo núcleo e sincroniza eventos GSE/RUNE verificados. Ela não contém nem
+a compatibilidade calculada pelo núcleo e sincroniza eventos GSE/RUNE/Rockstar verificados. Ela não contém nem
 depende de código do LuaTools. Na primeira abertura, `bridge-cli.cmd` cria uma `.venv` isolada e instala
 automaticamente a dependência declarada em `requirements-cli.txt`; em uma árvore de fontes também compila o gateway se ele ainda não existir.
 
@@ -66,6 +66,7 @@ Os estados exibidos são:
 - `COMPLETO`: o Bridge detecta o evento e sincroniza com a Steam;
 - `NATIVO`: Steamworks oficial, portanto o jogo não precisa do Bridge;
 - `SÓ DETECTA`: o evento é detectável, mas a CLI ainda não sincroniza sozinha;
+- `AGUARDA DADOS`: o runtime Rockstar foi identificado e o catálogo Steam está disponível, mas ainda não apareceu um estado local legível;
 - `SEM SUPORTE`: runtime sem provider de conquistas implementado.
 
 O catálogo de um jogo também pode ser consultado diretamente pelo AppID:
@@ -104,7 +105,21 @@ Para opcionalmente aguardar um jogo abrir antes da transação:
 .\bridge-cli.cmd simulate-popup 2638890 ACHIEVEMENT_050 --wait-for-game --game-dir "D:\SteamLibrary\steamapps\common\OnimushaWotS"
 ```
 
-Quando uma conquista GSE/RUNE é emitida, a CLI relê o arquivo do provider e comprova que o mesmo
+## Rockstar Social Club
+
+O detector reconhece instalações Rockstar oficiais e compatíveis, incluindo jogos com
+`socialclub.dll`, `title.rgl`, `socialclub_emu.ini` ou `RUNE64.dll`. O provider procura estados locais
+de conquistas nos perfis do Social Club e nos diretórios públicos usados por emuladores, associa os
+títulos conhecidos ao AppID Steam e só emite uma conquista após reler um campo explícito de
+desbloqueio em JSON ou INI.
+
+O catálogo, os nomes e as imagens continuam vindo da Steam. Se o runtime for detectado, mas o perfil
+só contiver blobs proprietários como `cfg.dat`, `pc_settings.bin` ou um `achievements.dat` não
+decodificável, a CLI mostra `AGUARDA DADOS`: as conquistas podem ser consultadas e usadas no simulador,
+mas o Bridge não adivinha nem envia desbloqueios. Assim que um estado legível aparecer, o watcher cria
+o baseline e passa a sincronizar apenas transições novas de bloqueada para desbloqueada.
+
+Quando uma conquista GSE/RUNE/Rockstar é emitida, a CLI relê o arquivo do provider e comprova que o mesmo
 AppID/API name está desbloqueado antes de escrever na Steam. Primeiro tenta `SetAchievement` +
 `StoreStats`; schemas protegidos usam o cache local nativo como fallback, com backup atômico.
 

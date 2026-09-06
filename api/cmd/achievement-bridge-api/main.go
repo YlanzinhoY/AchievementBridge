@@ -57,6 +57,7 @@ type gameSupport struct {
 	Provider         string  `json:"provider"`
 	Confidence       uint8   `json:"confidence"`
 	AchievementCount *uint64 `json:"achievement_count"`
+	StateAvailable   bool    `json:"state_available"`
 	Status           string  `json:"status"`
 }
 
