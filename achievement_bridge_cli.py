@@ -160,7 +160,10 @@ class BridgeApiClient:
                 )
 
             last_error: Exception | None = None
-            for _ in range(120):
+            # The Zig core may be completing an interrupted Steam preview.
+            # StoreStats recovery is intentionally allowed to outlive the
+            # normal fast startup path.
+            for _ in range(1800):
                 time.sleep(0.1)
                 try:
                     self._request_once("GET", "/v1/health", timeout=1)
@@ -211,6 +214,30 @@ class BridgeApiClient:
         if not isinstance(decoded, dict):
             raise RuntimeError("a API local retornou uma resposta inválida")
         return decoded
+
+    def stream_monitor_events(self) -> Iterable[str]:
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/monitor/events",
+            headers={"Accept": "text/event-stream"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=None) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if not line.startswith("data: "):
+                        continue
+                    value = json.loads(line[6:])
+                    if isinstance(value, str):
+                        yield value
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
+            raise ConnectionError("o stream de eventos do Bridge foi encerrado") from error
+
+    def shutdown(self) -> None:
+        try:
+            self._request_once("POST", "/v1/shutdown", {}, timeout=5)
+        except (ConnectionError, RuntimeError):
+            pass
 
 
 def find_api(bridge: Path) -> Path:
@@ -700,6 +727,18 @@ def print_achievement_table(game: InstalledGame, achievements: list[AvailableAch
 
 
 def other_bridge_process_exists() -> bool:
+    try:
+        request = urllib.request.Request(
+            f"{os.environ.get('ACHIEVEMENT_BRIDGE_API_URL', DEFAULT_API_URL).rstrip('/')}/v1/health",
+            headers={"Accept": "application/json"},
+            method="GET",
+        )
+        with urllib.request.urlopen(request, timeout=0.5) as response:
+            health = json.loads(response.read().decode("utf-8"))
+        if bool(health.get("core", {}).get("monitoring", False)):
+            return True
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, AttributeError):
+        pass
     if os.name != "nt":
         return False
     result = subprocess.run(
@@ -1000,32 +1039,31 @@ def sync_event(bridge: Path, event: AchievementEvent, steam_root: str | None, na
         log.write(f"SYNC PENDENTE appid={event.app_id} provider={event.provider}: mapeamento standalone ainda indisponível")
         return
 
-    command = f"{event.provider}-steam-sync"
-    arguments = [command, "--appid", str(event.app_id), "--achievement", event.achievement]
-    if steam_root:
-        arguments += ["--steam-root", steam_root]
-    result = run_bridge(bridge, arguments, timeout=45)
-    if result.returncode == 0:
-        log.write(f"STEAM OK appid={event.app_id} achievement={event.achievement} {result.stdout.strip()}")
-        return
-
-    # Protected schemas can reject the public ABI. Preserve the verified event
-    # in Steam's native local cache as the same fallback used by LuaTools.
-    fallback = ["steam-local-sync", "--appid", str(event.app_id), "--achievement", event.achievement]
+    payload: dict[str, object] = {
+        "app_id": event.app_id,
+        "achievement": event.achievement,
+        "provider": event.provider,
+        "native_toast": native_toast,
+    }
     if event.timestamp and event.timestamp > 0:
-        fallback += ["--timestamp", str(event.timestamp)]
-    if native_toast:
-        fallback.append("--experimental-steam-notification")
-    if steam_root:
-        fallback += ["--steam-root", steam_root]
-    local = run_bridge(bridge, fallback, timeout=45)
-    if local.returncode == 0:
-        log.write(f"STEAM CACHE OK appid={event.app_id} achievement={event.achievement} {local.stdout.strip()}")
-    else:
-        log.write(
-            f"STEAM FALHOU appid={event.app_id} achievement={event.achievement} "
-            f"direct={result.stdout.strip()} fallback={local.stdout.strip()}"
+        payload["timestamp"] = event.timestamp
+    try:
+        result = api_client(bridge, steam_root).request(
+            "POST",
+            "/v1/achievement-syncs",
+            payload,
+            timeout=180,
         )
+    except (ConnectionError, RuntimeError) as error:
+        log.write(
+            f"STEAM FALHOU appid={event.app_id} achievement={event.achievement} error={error}"
+        )
+        return
+    route = result.get("route", "unknown")
+    log.write(
+        f"STEAM OK appid={event.app_id} achievement={event.achievement} "
+        f"route={route} result={json.dumps(result, ensure_ascii=False, separators=(',', ':'))}"
+    )
 
 
 def start_monitor(args: MonitorOptions, bridge: Path) -> int:
@@ -1035,9 +1073,10 @@ def start_monitor(args: MonitorOptions, bridge: Path) -> int:
         return 2
 
     # Starting the Bridge means the public local API must be available too.
-    # The gateway owns the persistent control core; the watcher below remains
-    # on the compatibility path until its event stream is migrated to Go.
-    api_client(bridge, args.steam_root).ensure_started()
+    # The gateway owns the only persistent Zig core and streams its events back
+    # to this interface, avoiding a second watch-all process.
+    client = api_client(bridge, args.steam_root)
+    client.ensure_started()
 
     log_path = None if args.no_file_log else Path(args.log or default_log_path())
     log = LogSink(log_path)
@@ -1053,32 +1092,23 @@ def start_monitor(args: MonitorOptions, bridge: Path) -> int:
     if not args.no_scan:
         reports = inspect_installed_games(bridge, args.steam_root, verify_schema=True)
         print_game_table(reports)
-    command = [str(bridge), "watch-all", "--interval-ms", str(args.interval_ms)]
+    monitor_request: dict[str, object] = {
+        "interval_ms": args.interval_ms,
+        "recover": True,
+        "notifications": not args.no_notifications,
+    }
     if args.journal:
-        command += ["--journal", args.journal]
-    if args.no_notifications:
-        command.append("--no-notifications")
+        monitor_request["journal_path"] = args.journal
+    client.request("POST", "/v1/monitor/start", monitor_request, timeout=15)
 
-    log.write(f"INICIANDO executable={bridge}")
+    log.write(f"INICIANDO api={client.base_url} core={bridge}")
     if log_path:
         log.write(f"LOG arquivo={log_path}")
-    process = subprocess.Popen(
-        command,
-        cwd=bridge.parent,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-    )
     parser = EventParser()
     workers = ThreadPoolExecutor(max_workers=2, thread_name_prefix="steam-sync")
     last_session_heartbeat: str | None = None
     try:
-        assert process.stdout is not None
-        for raw_line in process.stdout:
-            line = raw_line.rstrip("\r\n")
+        for line in client.stream_monitor_events():
             if line.startswith("[AchievementBridge] active_game_sessions="):
                 if line == last_session_heartbeat:
                     continue
@@ -1091,16 +1121,11 @@ def start_monitor(args: MonitorOptions, bridge: Path) -> int:
                     f"achievement={event.achievement} recovered={event.recovered}"
                 )
                 workers.submit(sync_event, bridge, event, args.steam_root, args.native_toast, log)
-        return_code = process.wait()
-        log.write(f"ENCERRADO exit_code={return_code}")
-        return return_code
+        log.write("ENCERRADO stream de eventos finalizado")
+        return 0
     except KeyboardInterrupt:
         log.write("ENCERRANDO solicitado pelo usuário")
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        client.shutdown()
         return 0
     finally:
         workers.shutdown(wait=True, cancel_futures=False)
