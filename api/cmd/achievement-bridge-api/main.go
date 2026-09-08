@@ -21,6 +21,7 @@ import (
 
 	"github.com/YlanzinhoY/AchievementBridge/api/internal/core"
 	"github.com/YlanzinhoY/AchievementBridge/api/internal/events"
+	"github.com/YlanzinhoY/AchievementBridge/api/internal/gamestamp"
 )
 
 const (
@@ -123,7 +124,7 @@ func main() {
 		core:       coreClient,
 		supervisor: supervisor,
 	}
-	app.eventSync = newEventSyncer(app.callCore, supervisor.Events())
+	app.eventSync = newEventSyncer(app.callCore, supervisor.Events(), gamestamp.New(gamestamp.DefaultRoot()))
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", app.health)
 	mux.HandleFunc("GET /v1/games", app.listGames)
