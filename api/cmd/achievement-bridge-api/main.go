@@ -31,10 +31,11 @@ const (
 )
 
 type application struct {
-	core       coreCaller
-	supervisor coreSupervisor
-	eventSync  *eventSyncer
-	shutdown   func()
+	core        coreCaller
+	supervisor  coreSupervisor
+	eventSync   *eventSyncer
+	googleDrive *googleDriveBackup
+	shutdown    func()
 
 	recoveryMu    sync.Mutex
 	monitorMu     sync.RWMutex
@@ -120,8 +121,9 @@ func main() {
 	defer supervisor.Close()
 
 	app := &application{
-		core:       coreClient,
-		supervisor: supervisor,
+		core:        coreClient,
+		supervisor:  supervisor,
+		googleDrive: newGoogleDriveBackup(),
 	}
 	app.eventSync = newEventSyncer(app.callCore, supervisor.Events())
 	mux := http.NewServeMux()
@@ -134,6 +136,8 @@ func main() {
 	mux.HandleFunc("POST /v1/achievement-syncs", app.syncAchievement)
 	mux.HandleFunc("POST /v1/monitor/start", app.startMonitor)
 	mux.HandleFunc("GET /v1/monitor/events", app.monitorEvents)
+	mux.HandleFunc("GET /v1/cloud/google-drive/status", app.googleDriveStatus)
+	mux.HandleFunc("POST /v1/cloud/google-drive/backup", app.backupToGoogleDrive)
 	mux.HandleFunc("POST /v1/shutdown", app.shutdownAPI)
 
 	server := &http.Server{
