@@ -152,6 +152,10 @@ marcador e a versão do formato, AppID, provider, conquistas observadas, resulta
 Steam e um checksum SHA-256. Ele é atualizado primeiro como `detected` e depois como `synced` ou
 `failed`, sem depender do transporte em nuvem.
 
+Ao iniciar, a API também importa os eventos já existentes no journal. Isso cria os carimbos dos jogos
+que entregaram conquistas antes da atualização sem rebaixar conquistas que já estejam marcadas como
+sincronizadas.
+
 Uma futura integração de backup poderá procurar exclusivamente esses carimbos válidos e enviar os
 estados de conquista para o Google Drive. Saves dos jogos e caches da Steam não fazem parte do carimbo.
 
