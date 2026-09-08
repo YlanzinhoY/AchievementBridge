@@ -8,6 +8,7 @@ const MetadataCatalog = @import("../../core/metadata.zig").Catalog;
 const steam_metadata = @import("../../steam/metadata.zig");
 const mapper = @import("../../core/mapper.zig");
 const steam_install = @import("../../detector/steam_install.zig");
+const process_detector = @import("../../detector/process.zig");
 const gtav_enhanced = @import("games/gtav_enhanced.zig");
 
 pub const Options = struct {
@@ -85,8 +86,24 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     std.debug.print("[RockstarProvider] status=discovering source=social_club\n", .{});
     while (true) {
         const apps = if (steam_catalog) |*catalog| catalog.apps.items else &.{};
-        try discoverNewStates(allocator, io, resolved_options, apps, &journal, &tracked, &notifier, &metadata, &metadata_attempted);
-        for (tracked.items) |*state| try checkState(allocator, io, &journal, state, &notifier, &metadata);
+        var processes = try process_detector.enumerate(allocator);
+        defer processes.deinit();
+        try discoverNewStates(allocator, io, resolved_options, apps, processes.items.items, &journal, &tracked, &notifier, &metadata, &metadata_attempted);
+        var tracked_index: usize = 0;
+        while (tracked_index < tracked.items.len) {
+            const state = &tracked.items[tracked_index];
+            if (isAppRunning(state.app_id, apps, processes.items.items)) {
+                try checkState(allocator, io, &journal, state, &notifier, &metadata);
+                tracked_index += 1;
+                continue;
+            }
+            // Games commonly write their final save immediately before exit.
+            // Read it once, then stop tracking until a matching process starts.
+            try checkState(allocator, io, &journal, state, &notifier, &metadata);
+            std.debug.print("[RockstarProvider] appid={d} status=stopped file={s}\n", .{ state.app_id, state.state_file });
+            state.deinit(allocator);
+            _ = tracked.orderedRemove(tracked_index);
+        }
         try checkGtavEnhanced(
             allocator,
             io,
@@ -106,6 +123,7 @@ fn discoverNewStates(
     io: std.Io,
     options: Options,
     apps: []const steam_install.InstalledApp,
+    processes: []const process_detector.Process,
     journal: *Journal,
     tracked: *std.ArrayList(TrackedState),
     notifier: *?WindowsNotifier,
@@ -118,6 +136,7 @@ fn discoverNewStates(
     defer first_seen_apps.deinit();
 
     for (candidates.items.items) |candidate| {
+        if (!isAppRunning(candidate.app_id, apps, processes)) continue;
         if (isTracked(tracked.items, candidate.state_file)) continue;
         var current = readSnapshot(allocator, io, candidate.state_file) catch continue;
         errdefer current.deinit();
@@ -147,6 +166,31 @@ fn discoverNewStates(
     }
     var iterator = first_seen_apps.keyIterator();
     while (iterator.next()) |app_id| try journal.markProviderGame(.rockstar, app_id.*);
+}
+
+fn isAppRunning(
+    app_id: u32,
+    apps: []const steam_install.InstalledApp,
+    processes: []const process_detector.Process,
+) bool {
+    if (app_id == gtav_enhanced.app_id) {
+        for (processes) |process| {
+            if (std.ascii.eqlIgnoreCase(process.name, gtav_enhanced.executable_name)) return true;
+        }
+        return false;
+    }
+    for (apps) |app| {
+        if (app.app_id != app_id) continue;
+        const install_dir = std.mem.trimEnd(u8, app.install_dir, "\\/");
+        for (processes) |process| {
+            if (process.executable_path.len <= install_dir.len) continue;
+            if (!std.ascii.startsWithIgnoreCase(process.executable_path, install_dir)) continue;
+            const boundary = process.executable_path[install_dir.len];
+            if (boundary == '\\' or boundary == '/') return true;
+        }
+        return false;
+    }
+    return false;
 }
 
 fn checkGtavEnhanced(
@@ -313,4 +357,42 @@ fn emitEvent(
     if (notifier.*) |*active| active.show(allocator, achievement, display_name, description, global_percent) catch |err| {
         std.debug.print("[RockstarProvider] notification_error={s}\n", .{@errorName(err)});
     };
+}
+
+test "GTA save watcher requires the real game process" {
+    const launcher = [_]process_detector.Process{.{
+        .pid = 10,
+        .name = @constCast("PlayGTAV.exe"),
+        .executable_path = @constCast("D:/SteamLibrary/steamapps/common/Grand Theft Auto V Enhanced/PlayGTAV.exe"),
+    }};
+    try std.testing.expect(!isAppRunning(gtav_enhanced.app_id, &.{}, &launcher));
+
+    const game = [_]process_detector.Process{.{
+        .pid = 11,
+        .name = @constCast("GTA5_Enhanced.exe"),
+        .executable_path = @constCast("D:/SteamLibrary/steamapps/common/Grand Theft Auto V Enhanced/GTA5_Enhanced.exe"),
+    }};
+    try std.testing.expect(isAppRunning(gtav_enhanced.app_id, &.{}, &game));
+}
+
+test "generic Rockstar save watcher follows installed game directory" {
+    const apps = [_]steam_install.InstalledApp{.{
+        .app_id = 4_242_424,
+        .name = @constCast("Future Rockstar Game"),
+        .install_dir = @constCast("D:/SteamLibrary/steamapps/common/Future Rockstar Game"),
+        .library_root = @constCast("D:/SteamLibrary"),
+    }};
+    const unrelated = [_]process_detector.Process{.{
+        .pid = 12,
+        .name = @constCast("launcher.exe"),
+        .executable_path = @constCast("C:/Program Files/Rockstar Games/Launcher/launcher.exe"),
+    }};
+    try std.testing.expect(!isAppRunning(4_242_424, &apps, &unrelated));
+
+    const game = [_]process_detector.Process{.{
+        .pid = 13,
+        .name = @constCast("FutureGame.exe"),
+        .executable_path = @constCast("D:/SteamLibrary/steamapps/common/Future Rockstar Game/bin/FutureGame.exe"),
+    }};
+    try std.testing.expect(isAppRunning(4_242_424, &apps, &game));
 }

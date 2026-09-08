@@ -100,6 +100,8 @@ de conquistas nos perfis do Social Club e nos diretórios públicos usados por e
 ao AppID compara dinamicamente o título e a pasta do perfil com toda a biblioteca Steam instalada;
 aliases conhecidos existem apenas como fallback. Jogos que não publicam esse estado em arquivo podem ter um
 adaptador isolado em `src/providers/rockstar/games`, sem colocar regras específicas no núcleo do provider.
+Os arquivos de estado só são acompanhados enquanto o executável correspondente estiver ativo; ao encerrar o
+jogo, o Bridge faz uma última leitura e remove o estado do watcher. Cópias `SGTA*.bak` são sempre ignoradas.
 
 O GTA V Enhanced possui o primeiro desses adaptadores. Enquanto `GTA5_Enhanced.exe` está aberto, ele localiza
 por assinatura a rotina `HAS_ACHIEVEMENT_BEEN_PASSED`, lê passivamente a lista viva do Social Club e mapeia os
@@ -129,7 +131,7 @@ formato de releases necessário para atualizações futuras.
 Para gerar uma release local a partir dos fontes:
 
 ```powershell
-.\scripts\build-installer.ps1 -Version 0.1.12
+.\scripts\build-installer.ps1 -Version 0.1.13
 ```
 
 O script compila o núcleo Zig em `ReleaseSafe`, executa a suíte existente, compila o gateway Go, gera o ícone, empacota a CLI e grava o setup,
@@ -137,7 +139,7 @@ o pacote completo e o feed Velopack em `dist`. Para reconstruir com binários Zi
 limpar os artefatos de release anteriores:
 
 ```powershell
-.\scripts\build-installer.ps1 -Version 0.1.12 -SkipZigBuild -SkipGoBuild -CleanReleases
+.\scripts\build-installer.ps1 -Version 0.1.13 -SkipZigBuild -SkipGoBuild -CleanReleases
 ```
 
 As ferramentas de build ficam fixadas em `requirements-build.txt` e `.config/dotnet-tools.json`.
