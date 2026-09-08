@@ -100,6 +100,8 @@ de conquistas nos perfis do Social Club e nos diretórios públicos usados por e
 ao AppID compara dinamicamente o título e a pasta do perfil com toda a biblioteca Steam instalada;
 aliases conhecidos existem apenas como fallback. Jogos que não publicam esse estado em arquivo podem ter um
 adaptador isolado em `src/providers/rockstar/games`, sem colocar regras específicas no núcleo do provider.
+Os arquivos de estado só são acompanhados enquanto o executável correspondente estiver ativo; ao encerrar o
+jogo, o Bridge faz uma última leitura e remove o estado do watcher. Cópias `SGTA*.bak` são sempre ignoradas.
 
 O GTA V Enhanced possui o primeiro desses adaptadores. Enquanto `GTA5_Enhanced.exe` está aberto, ele localiza
 por assinatura a rotina `HAS_ACHIEVEMENT_BEEN_PASSED`, lê passivamente a lista viva do Social Club e mapeia os

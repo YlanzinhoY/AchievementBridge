@@ -80,9 +80,19 @@ fn isReadableState(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !
 }
 
 fn isStateName(name: []const u8) bool {
-    if (std.ascii.startsWithIgnoreCase(name, "SGTA")) return true;
+    // Rockstar save slots have no extension. RUNE keeps adjacent `.bak`
+    // copies that must never be treated as independent live state.
+    if (std.ascii.startsWithIgnoreCase(name, "SGTA"))
+        return std.mem.indexOfScalar(u8, name, '.') == null;
     for (state_names) |candidate| if (std.ascii.eqlIgnoreCase(name, candidate)) return true;
     return false;
+}
+
+test "ignore Rockstar backup save slots" {
+    try std.testing.expect(isStateName("SGTA50000"));
+    try std.testing.expect(isStateName("SGTA50015"));
+    try std.testing.expect(!isStateName("SGTA50000.bak"));
+    try std.testing.expect(!isStateName("SGTA50015.BAK"));
 }
 
 pub fn inferAppId(path: []const u8) ?u32 {
