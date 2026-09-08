@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,16 +23,19 @@ const (
 )
 
 type Event struct {
-	AppID       uint32
-	Provider    string
-	APIName     string
-	UnlockedAt  int64
-	SteamStatus string
-	SteamRoute  string
+	AppID            uint32
+	Provider         string
+	SourceID         string
+	CanonicalAPIName string
+	UnlockedAt       int64
+	SteamStatus      string
+	SteamRoute       string
 }
 
 type Achievement struct {
-	APIName      string `json:"api_name"`
+	Provider     string `json:"provider"`
+	SourceID     string `json:"source_id"`
+	APIName      string `json:"api_name,omitempty"`
 	UnlockedAt   int64  `json:"unlocked_at"`
 	SteamStatus  string `json:"steam_status"`
 	SteamRoute   string `json:"steam_route,omitempty"`
@@ -64,6 +68,13 @@ type journalRecord struct {
 	UnlockedAt int64  `json:"unlocked_at"`
 }
 
+type supportManifest struct {
+	SchemaVersion     int     `json:"schema_version"`
+	SteamAppID        uint32  `json:"steam_app_id"`
+	Provider          string  `json:"provider"`
+	ProviderProductID *uint32 `json:"provider_product_id"`
+}
+
 func New(root string) *Store {
 	return &Store{root: root, now: time.Now}
 }
@@ -90,7 +101,22 @@ func DefaultJournalPath() string {
 	return filepath.Join(root, "AchievementBridge", "journal.jsonl")
 }
 
-func (s *Store) ImportJournal(path string) (int, error) {
+func DefaultSupportRoot() string {
+	if configured := strings.TrimSpace(os.Getenv("ACHIEVEMENT_BRIDGE_SUPPORT_DIR")); configured != "" {
+		return configured
+	}
+	root, err := os.UserCacheDir()
+	if err != nil || root == "" {
+		return filepath.Join(".achievement-bridge", "support")
+	}
+	return filepath.Join(root, "AchievementBridge", "support")
+}
+
+func (s *Store) ImportJournal(path string, supportRoot string) (int, error) {
+	productIDs, err := loadProductIDs(supportRoot)
+	if err != nil {
+		return 0, err
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return 0, err
@@ -101,17 +127,29 @@ func (s *Store) ImportJournal(path string) (int, error) {
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		var record journalRecord
+		record := journalRecord{Provider: "gse"}
 		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
 			continue
 		}
 		if record.Kind != "event" || record.AppID == 0 || record.SourceID == "" {
 			continue
 		}
+		record.Provider = strings.ToLower(strings.TrimSpace(record.Provider))
+		if !supportedProvider(record.Provider) {
+			continue
+		}
+		appID := record.AppID
+		if strings.EqualFold(record.Provider, "uplay_r2") {
+			resolved, found := productIDs[providerProductKey(record.Provider, record.AppID)]
+			if !found || resolved == 0 {
+				continue
+			}
+			appID = resolved
+		}
 		if err := s.Record(Event{
-			AppID:       record.AppID,
+			AppID:       appID,
 			Provider:    record.Provider,
-			APIName:     record.SourceID,
+			SourceID:    record.SourceID,
 			UnlockedAt:  record.UnlockedAt,
 			SteamStatus: "detected",
 		}); err != nil {
@@ -125,16 +163,57 @@ func (s *Store) ImportJournal(path string) (int, error) {
 	return imported, nil
 }
 
+func loadProductIDs(supportRoot string) (map[string]uint32, error) {
+	result := make(map[string]uint32)
+	paths, err := filepath.Glob(filepath.Join(supportRoot, "games", "*", "support.json"))
+	if err != nil {
+		return nil, fmt.Errorf("find support manifests: %w", err)
+	}
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var manifest supportManifest
+		if json.Unmarshal(content, &manifest) != nil || manifest.SchemaVersion != 1 || manifest.SteamAppID == 0 || manifest.ProviderProductID == nil || *manifest.ProviderProductID == 0 {
+			continue
+		}
+		if filepath.Base(filepath.Dir(path)) != strconv.FormatUint(uint64(manifest.SteamAppID), 10) {
+			continue
+		}
+		key := providerProductKey(manifest.Provider, *manifest.ProviderProductID)
+		if existing, found := result[key]; found && existing != manifest.SteamAppID {
+			result[key] = 0 // Ambiguous ownership must not select a game arbitrarily.
+		} else {
+			result[key] = manifest.SteamAppID
+		}
+	}
+	return result, nil
+}
+
+func providerProductKey(provider string, productID uint32) string {
+	return strings.ToLower(strings.TrimSpace(provider)) + ":" + strconv.FormatUint(uint64(productID), 10)
+}
+
 func (s *Store) Record(event Event) error {
-	if event.AppID == 0 || strings.TrimSpace(event.Provider) == "" || strings.TrimSpace(event.APIName) == "" {
+	event.Provider = strings.ToLower(strings.TrimSpace(event.Provider))
+	event.SourceID = strings.TrimSpace(event.SourceID)
+	event.SteamStatus = strings.ToLower(strings.TrimSpace(event.SteamStatus))
+	if event.SteamStatus == "" {
+		event.SteamStatus = "detected"
+	}
+	if event.AppID == 0 || !supportedProvider(event.Provider) || event.SourceID == "" {
 		return fmt.Errorf("game stamp requires app id, provider and achievement")
+	}
+	if event.SteamStatus != "detected" && event.SteamStatus != "synced" && event.SteamStatus != "failed" {
+		return fmt.Errorf("invalid Steam status for game stamp")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := s.now().Unix()
-	if event.UnlockedAt <= 0 {
-		event.UnlockedAt = now
+	if event.UnlockedAt < 0 {
+		event.UnlockedAt = 0
 	}
 	path := s.Path(event.AppID)
 	stamp, err := load(path)
@@ -161,14 +240,6 @@ func (s *Store) Record(event Event) error {
 		stamp.Provider = provider
 		changed = true
 	}
-	if stamp.FirstAchievementAt == 0 || event.UnlockedAt < stamp.FirstAchievementAt {
-		stamp.FirstAchievementAt = event.UnlockedAt
-		changed = true
-	}
-	if event.UnlockedAt > stamp.LastAchievementAt {
-		stamp.LastAchievementAt = event.UnlockedAt
-		changed = true
-	}
 	if upsertAchievement(&stamp, event, now) {
 		changed = true
 	}
@@ -176,8 +247,20 @@ func (s *Store) Record(event Event) error {
 		return nil
 	}
 	stamp.UpdatedAt = now
+	stamp.FirstAchievementAt, stamp.LastAchievementAt = 0, 0
+	for _, achievement := range stamp.Achievements {
+		if achievement.UnlockedAt > 0 && (stamp.FirstAchievementAt == 0 || achievement.UnlockedAt < stamp.FirstAchievementAt) {
+			stamp.FirstAchievementAt = achievement.UnlockedAt
+		}
+		if achievement.UnlockedAt > stamp.LastAchievementAt {
+			stamp.LastAchievementAt = achievement.UnlockedAt
+		}
+	}
 	sort.Slice(stamp.Achievements, func(i, j int) bool {
-		return stamp.Achievements[i].APIName < stamp.Achievements[j].APIName
+		if stamp.Achievements[i].Provider != stamp.Achievements[j].Provider {
+			return stamp.Achievements[i].Provider < stamp.Achievements[j].Provider
+		}
+		return stamp.Achievements[i].SourceID < stamp.Achievements[j].SourceID
 	})
 	checksum, err := calculateChecksum(stamp)
 	if err != nil {
@@ -198,27 +281,33 @@ func upsertAchievement(stamp *Stamp, event Event, verifiedAt int64) bool {
 	}
 	for index := range stamp.Achievements {
 		achievement := &stamp.Achievements[index]
-		if achievement.APIName != event.APIName {
+		if achievement.SourceID != event.SourceID || achievement.Provider != event.Provider {
 			continue
 		}
 		changed := false
-		if achievement.UnlockedAt == 0 || event.UnlockedAt < achievement.UnlockedAt {
+		if event.UnlockedAt > 0 && (achievement.UnlockedAt == 0 || event.UnlockedAt < achievement.UnlockedAt) {
 			achievement.UnlockedAt = event.UnlockedAt
 			changed = true
 		}
 		if statusPriority(status) < statusPriority(achievement.SteamStatus) {
 			return changed
 		}
-		if achievement.SteamStatus != status || achievement.SteamRoute != strings.TrimSpace(event.SteamRoute) {
+		canonical := strings.TrimSpace(event.CanonicalAPIName)
+		if achievement.SteamStatus != status || achievement.SteamRoute != strings.TrimSpace(event.SteamRoute) || (canonical != "" && achievement.APIName != canonical) {
 			achievement.SteamStatus = status
 			achievement.SteamRoute = strings.TrimSpace(event.SteamRoute)
+			if canonical != "" {
+				achievement.APIName = canonical
+			}
 			achievement.LastVerified = verifiedAt
 			changed = true
 		}
 		return changed
 	}
 	stamp.Achievements = append(stamp.Achievements, Achievement{
-		APIName:      event.APIName,
+		Provider:     event.Provider,
+		SourceID:     event.SourceID,
+		APIName:      strings.TrimSpace(event.CanonicalAPIName),
 		UnlockedAt:   event.UnlockedAt,
 		SteamStatus:  status,
 		SteamRoute:   strings.TrimSpace(event.SteamRoute),
@@ -238,10 +327,31 @@ func statusPriority(status string) int {
 	}
 }
 
+func supportedProvider(provider string) bool {
+	switch provider {
+	case "gse", "rune", "rockstar", "uplay_r2", "steam":
+		return true
+	default:
+		return false
+	}
+}
+
+// Load validates one stamp; callers can use it when discovering portable state.
+func Load(path string) (Stamp, error) { return load(path) }
+
 func load(path string) (Stamp, error) {
-	content, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return Stamp{}, err
+	}
+	defer file.Close()
+	const limit = 32 * 1024 * 1024
+	content, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return Stamp{}, err
+	}
+	if len(content) > limit {
+		return Stamp{}, fmt.Errorf("game stamp exceeds size limit")
 	}
 	var stamp Stamp
 	if err := json.Unmarshal(content, &stamp); err != nil {
@@ -249,6 +359,20 @@ func load(path string) (Stamp, error) {
 	}
 	if stamp.Kind != Kind || stamp.SchemaVersion != SchemaVersion {
 		return Stamp{}, fmt.Errorf("invalid game stamp marker in %s", path)
+	}
+	if stamp.AppID == 0 || !supportedProvider(stamp.Provider) || len(stamp.Achievements) == 0 {
+		return Stamp{}, fmt.Errorf("invalid game stamp identity in %s", path)
+	}
+	seen := make(map[string]bool)
+	for _, achievement := range stamp.Achievements {
+		key := achievement.Provider + ":" + achievement.SourceID
+		if !supportedProvider(achievement.Provider) || strings.TrimSpace(achievement.SourceID) == "" || seen[key] {
+			return Stamp{}, fmt.Errorf("invalid achievement identity in %s", path)
+		}
+		if achievement.SteamStatus != "detected" && achievement.SteamStatus != "failed" && achievement.SteamStatus != "synced" {
+			return Stamp{}, fmt.Errorf("invalid achievement status in %s", path)
+		}
+		seen[key] = true
 	}
 	expected, err := calculateChecksum(stamp)
 	if err != nil {
@@ -302,15 +426,10 @@ func write(path string, stamp Stamp) error {
 		return err
 	}
 
-	previous := path + ".previous"
-	_ = os.Remove(previous)
-	if err := os.Rename(path, previous); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("preserve previous game stamp: %w", err)
-	}
+	// Go uses MoveFileEx(REPLACE_EXISTING) on Windows. Keep the old file in place
+	// until the complete replacement is ready, including when replacement fails.
 	if err := os.Rename(temporaryPath, path); err != nil {
-		_ = os.Rename(previous, path)
 		return fmt.Errorf("replace game stamp: %w", err)
 	}
-	_ = os.Remove(previous)
 	return nil
 }

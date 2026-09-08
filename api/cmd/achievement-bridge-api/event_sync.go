@@ -112,7 +112,7 @@ func (s *eventSyncer) run() {
 }
 
 func (s *eventSyncer) syncEvent(event *achievementEvent) {
-	s.recordStamp(event, "detected", "")
+	s.recordStamp(event, "detected", "", "")
 	params := map[string]any{
 		"app_id":       event.AppID,
 		"achievement":  event.Achievement,
@@ -126,7 +126,7 @@ func (s *eventSyncer) syncEvent(event *achievementEvent) {
 	defer cancel()
 	var result map[string]any
 	if err := s.call(ctx, "sync_achievement", params, &result); err != nil {
-		s.recordStamp(event, "failed", "")
+		s.recordStamp(event, "failed", "", "")
 		log.Printf("automatic Steam sync failed appid=%d achievement=%s provider=%s: %v", event.AppID, event.Achievement, event.Provider, err)
 		return
 	}
@@ -134,11 +134,15 @@ func (s *eventSyncer) syncEvent(event *achievementEvent) {
 	if result["route"] != nil {
 		route = fmt.Sprint(result["route"])
 	}
-	s.recordStamp(event, "synced", route)
+	canonical := ""
+	if result["achievement"] != nil {
+		canonical = fmt.Sprint(result["achievement"])
+	}
+	s.recordStamp(event, "synced", route, canonical)
 	log.Printf("automatic Steam sync complete appid=%d achievement=%s provider=%s route=%v", event.AppID, event.Achievement, event.Provider, result["route"])
 }
 
-func (s *eventSyncer) recordStamp(event *achievementEvent, steamStatus string, steamRoute string) {
+func (s *eventSyncer) recordStamp(event *achievementEvent, steamStatus string, steamRoute string, canonicalAPIName string) {
 	if s.stamps == nil {
 		return
 	}
@@ -147,12 +151,13 @@ func (s *eventSyncer) recordStamp(event *achievementEvent, steamStatus string, s
 		unlockedAt = int64(*event.Timestamp)
 	}
 	if err := s.stamps.Record(gamestamp.Event{
-		AppID:       event.AppID,
-		Provider:    event.Provider,
-		APIName:     event.Achievement,
-		UnlockedAt:  unlockedAt,
-		SteamStatus: steamStatus,
-		SteamRoute:  steamRoute,
+		AppID:            event.AppID,
+		Provider:         event.Provider,
+		SourceID:         event.Achievement,
+		CanonicalAPIName: canonicalAPIName,
+		UnlockedAt:       unlockedAt,
+		SteamStatus:      steamStatus,
+		SteamRoute:       steamRoute,
 	}); err != nil {
 		log.Printf("game stamp update failed appid=%d achievement=%s provider=%s: %v", event.AppID, event.Achievement, event.Provider, err)
 	}

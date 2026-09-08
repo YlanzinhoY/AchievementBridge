@@ -26,7 +26,7 @@ func TestEventSyncerStampsDetectedAndSyncedAchievement(t *testing.T) {
 				t.Fatalf("unexpected core method: %s", method)
 			}
 			output := result.(*map[string]any)
-			*output = map[string]any{"route": "local-cache"}
+			*output = map[string]any{"route": "local-cache", "achievement": "AWARD_SHARKS_CANONICAL"}
 			return nil
 		},
 	}
@@ -40,6 +40,9 @@ func TestEventSyncerStampsDetectedAndSyncedAchievement(t *testing.T) {
 	}
 	if stamps.events[1].SteamRoute != "local-cache" || stamps.events[1].UnlockedAt != 123 {
 		t.Fatalf("unexpected synchronized stamp: %+v", stamps.events[1])
+	}
+	if stamps.events[1].SourceID != "AWARD_SHARKS" || stamps.events[1].CanonicalAPIName != "AWARD_SHARKS_CANONICAL" {
+		t.Fatalf("unexpected achievement identity: %+v", stamps.events[1])
 	}
 }
 

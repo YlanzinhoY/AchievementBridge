@@ -125,7 +125,7 @@ func main() {
 		supervisor: supervisor,
 	}
 	stampStore := gamestamp.New(gamestamp.DefaultRoot())
-	if imported, err := stampStore.ImportJournal(gamestamp.DefaultJournalPath()); err != nil && !os.IsNotExist(err) {
+	if imported, err := stampStore.ImportJournal(gamestamp.DefaultJournalPath(), gamestamp.DefaultSupportRoot()); err != nil && !os.IsNotExist(err) {
 		log.Printf("game stamp journal import failed: %v", err)
 	} else if imported > 0 {
 		log.Printf("game stamps loaded from journal achievements=%d", imported)
