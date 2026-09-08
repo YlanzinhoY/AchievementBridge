@@ -124,7 +124,13 @@ func main() {
 		core:       coreClient,
 		supervisor: supervisor,
 	}
-	app.eventSync = newEventSyncer(app.callCore, supervisor.Events(), gamestamp.New(gamestamp.DefaultRoot()))
+	stampStore := gamestamp.New(gamestamp.DefaultRoot())
+	if imported, err := stampStore.ImportJournal(gamestamp.DefaultJournalPath()); err != nil && !os.IsNotExist(err) {
+		log.Printf("game stamp journal import failed: %v", err)
+	} else if imported > 0 {
+		log.Printf("game stamps loaded from journal achievements=%d", imported)
+	}
+	app.eventSync = newEventSyncer(app.callCore, supervisor.Events(), stampStore)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", app.health)
 	mux.HandleFunc("GET /v1/games", app.listGames)

@@ -1,6 +1,7 @@
 package gamestamp
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -55,6 +56,14 @@ type Store struct {
 	mu   sync.Mutex
 }
 
+type journalRecord struct {
+	Kind       string `json:"kind"`
+	AppID      uint32 `json:"app_id"`
+	Provider   string `json:"provider"`
+	SourceID   string `json:"source_id"`
+	UnlockedAt int64  `json:"unlocked_at"`
+}
+
 func New(root string) *Store {
 	return &Store{root: root, now: time.Now}
 }
@@ -68,6 +77,52 @@ func DefaultRoot() string {
 		return filepath.Join(".achievement-bridge", "games")
 	}
 	return filepath.Join(root, "AchievementBridge", "games")
+}
+
+func DefaultJournalPath() string {
+	if configured := strings.TrimSpace(os.Getenv("ACHIEVEMENT_BRIDGE_JOURNAL_PATH")); configured != "" {
+		return configured
+	}
+	root, err := os.UserCacheDir()
+	if err != nil || root == "" {
+		return filepath.Join(".achievement-bridge", "journal.jsonl")
+	}
+	return filepath.Join(root, "AchievementBridge", "journal.jsonl")
+}
+
+func (s *Store) ImportJournal(path string) (int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	imported := 0
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var record journalRecord
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			continue
+		}
+		if record.Kind != "event" || record.AppID == 0 || record.SourceID == "" {
+			continue
+		}
+		if err := s.Record(Event{
+			AppID:       record.AppID,
+			Provider:    record.Provider,
+			APIName:     record.SourceID,
+			UnlockedAt:  record.UnlockedAt,
+			SteamStatus: "detected",
+		}); err != nil {
+			return imported, err
+		}
+		imported++
+	}
+	if err := scanner.Err(); err != nil {
+		return imported, fmt.Errorf("read achievement journal: %w", err)
+	}
+	return imported, nil
 }
 
 func (s *Store) Record(event Event) error {
@@ -86,7 +141,8 @@ func (s *Store) Record(event Event) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if os.IsNotExist(err) {
+	newStamp := os.IsNotExist(err)
+	if newStamp {
 		stamp = Stamp{
 			Kind:               Kind,
 			SchemaVersion:      SchemaVersion,
@@ -99,15 +155,27 @@ func (s *Store) Record(event Event) error {
 		return fmt.Errorf("game stamp app id mismatch: expected %d, found %d", event.AppID, stamp.AppID)
 	}
 
-	stamp.Provider = strings.ToLower(strings.TrimSpace(event.Provider))
-	stamp.UpdatedAt = now
+	changed := newStamp
+	provider := strings.ToLower(strings.TrimSpace(event.Provider))
+	if stamp.Provider != provider {
+		stamp.Provider = provider
+		changed = true
+	}
 	if stamp.FirstAchievementAt == 0 || event.UnlockedAt < stamp.FirstAchievementAt {
 		stamp.FirstAchievementAt = event.UnlockedAt
+		changed = true
 	}
 	if event.UnlockedAt > stamp.LastAchievementAt {
 		stamp.LastAchievementAt = event.UnlockedAt
+		changed = true
 	}
-	upsertAchievement(&stamp, event, now)
+	if upsertAchievement(&stamp, event, now) {
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	stamp.UpdatedAt = now
 	sort.Slice(stamp.Achievements, func(i, j int) bool {
 		return stamp.Achievements[i].APIName < stamp.Achievements[j].APIName
 	})
@@ -123,7 +191,7 @@ func (s *Store) Path(appID uint32) string {
 	return filepath.Join(s.root, strconv.FormatUint(uint64(appID), 10), FileName)
 }
 
-func upsertAchievement(stamp *Stamp, event Event, verifiedAt int64) {
+func upsertAchievement(stamp *Stamp, event Event, verifiedAt int64) bool {
 	status := strings.ToLower(strings.TrimSpace(event.SteamStatus))
 	if status == "" {
 		status = "detected"
@@ -133,13 +201,21 @@ func upsertAchievement(stamp *Stamp, event Event, verifiedAt int64) {
 		if achievement.APIName != event.APIName {
 			continue
 		}
+		changed := false
 		if achievement.UnlockedAt == 0 || event.UnlockedAt < achievement.UnlockedAt {
 			achievement.UnlockedAt = event.UnlockedAt
+			changed = true
 		}
-		achievement.SteamStatus = status
-		achievement.SteamRoute = strings.TrimSpace(event.SteamRoute)
-		achievement.LastVerified = verifiedAt
-		return
+		if statusPriority(status) < statusPriority(achievement.SteamStatus) {
+			return changed
+		}
+		if achievement.SteamStatus != status || achievement.SteamRoute != strings.TrimSpace(event.SteamRoute) {
+			achievement.SteamStatus = status
+			achievement.SteamRoute = strings.TrimSpace(event.SteamRoute)
+			achievement.LastVerified = verifiedAt
+			changed = true
+		}
+		return changed
 	}
 	stamp.Achievements = append(stamp.Achievements, Achievement{
 		APIName:      event.APIName,
@@ -148,6 +224,18 @@ func upsertAchievement(stamp *Stamp, event Event, verifiedAt int64) {
 		SteamRoute:   strings.TrimSpace(event.SteamRoute),
 		LastVerified: verifiedAt,
 	})
+	return true
+}
+
+func statusPriority(status string) int {
+	switch status {
+	case "synced":
+		return 3
+	case "failed":
+		return 2
+	default:
+		return 1
+	}
 }
 
 func load(path string) (Stamp, error) {
