@@ -154,7 +154,16 @@ Steam e um checksum SHA-256. Ele é atualizado primeiro como `detected` e depois
 
 Ao iniciar, a API também importa os eventos já existentes no journal. Isso cria os carimbos dos jogos
 que entregaram conquistas antes da atualização sem rebaixar conquistas que já estejam marcadas como
-sincronizadas.
+sincronizadas. Registros históricos ficam como `detected`: o journal comprova uma observação do
+provider, não uma confirmação de sincronização Steam. Baselines e previews não criam carimbos.
+
+O `app_id` sempre identifica o jogo na Steam. Eventos Uplay R2 históricos usam os manifestos
+`support/games/<AppID>/support.json` para converter Product IDs Ubisoft; associações ausentes ou
+ambíguas são ignoradas. Cada conquista preserva `provider` e `source_id`; `api_name` só é preenchido
+quando o núcleo retorna o nome canônico da Steam. Horários desconhecidos ficam em zero.
+
+O checksum detecta corrupção de conteúdo; ele não é uma assinatura de autenticidade. O pacote Go
+`internal/gamestamp` expõe `Load` para validar esses arquivos quando o scanner for implementado.
 
 Uma futura integração de backup poderá procurar exclusivamente esses carimbos válidos e enviar os
 estados de conquista para o Google Drive. Saves dos jogos e caches da Steam não fazem parte do carimbo.
