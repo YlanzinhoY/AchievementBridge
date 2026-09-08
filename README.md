@@ -142,6 +142,20 @@ limpar os artefatos de release anteriores:
 
 As ferramentas de build ficam fixadas em `requirements-build.txt` e `.config/dotnet-tools.json`.
 
+## Backup experimental no Google Drive
+
+A branch de integração em desenvolvimento já consegue enviar o journal de conquistas para a pasta
+privada do Achievement Bridge no Google Drive (`appDataFolder`). Por enquanto a conexão usa um token
+OAuth com o escopo `https://www.googleapis.com/auth/drive.appdata` fornecido somente ao processo:
+
+```powershell
+$env:ACHIEVEMENT_BRIDGE_GOOGLE_DRIVE_TOKEN = "TOKEN_OAUTH"
+```
+
+`GET /v1/cloud/google-drive/status` verifica a conexão e `POST /v1/cloud/google-drive/backup` cria ou
+atualiza `achievement-bridge-journal.jsonl`. A restauração e o login interativo serão adicionados antes
+de esta opção aparecer na CLI; esta primeira etapa nunca sobrescreve o progresso local.
+
 ## GSE / Goldberg-compatible
 
 Descobrir saves conhecidos:
