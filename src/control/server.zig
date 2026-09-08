@@ -20,6 +20,7 @@ pub const MonitorDefaults = struct {
     journal_path: []const u8,
     replay_guard_path: []const u8,
     backup_root: []const u8,
+    support_root: []const u8,
 };
 
 const Request = struct {
@@ -53,6 +54,7 @@ const GameSupport = struct {
     achievement_count: ?usize,
     state_available: bool,
     status: []const u8,
+    provider_product_id: ?u32 = null,
 };
 
 const State = struct {
@@ -133,6 +135,7 @@ const State = struct {
             else
                 self.monitor.journal_path,
             .replay_guard_path = self.monitor.replay_guard_path,
+            .support_root = self.monitor.support_root,
             .interval_ms = params.interval_ms,
             .recover = params.recover,
             .notifications = params.notifications,
@@ -262,6 +265,65 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
                 }
             } else |_| {}
 
+            if (try bridge.game_support.load(allocator, state.io, state.monitor.support_root, app.app_id)) |loaded_value| {
+                var loaded = loaded_value;
+                defer loaded.deinit();
+                const manifest = loaded.value();
+                const diagnostic = bridge.providers.uplay_r2.diagnostic.diagnose(allocator, state.io, app.install_dir) catch null;
+                if (diagnostic != null and diagnostic.?.ready() and manifest.catalog_count > 0) {
+                    var product_id = manifest.provider_product_id orelse
+                        try bridge.game_support.readUplayProductId(allocator, state.io, app.install_dir);
+                    if (product_id == null) product_id =
+                        try bridge.game_support.findRecentUnclaimedUplayProductId(
+                            allocator,
+                            state.io,
+                            state.monitor.support_root,
+                            state.monitor.r2_roots,
+                            app.app_id,
+                            manifest.prepared_at,
+                        );
+                    const source_state = if (product_id) |id|
+                        try bridge.game_support.findSourceState(allocator, state.io, state.monitor.r2_roots, id)
+                    else
+                        null;
+                    defer if (source_state) |path| allocator.free(path);
+                    const complete = product_id != null and source_state != null;
+                    if (product_id != manifest.provider_product_id or complete != manifest.capabilities.sync_to_steam) {
+                        const refreshed_path = try bridge.game_support.save(allocator, state.io, state.monitor.support_root, .{
+                            .steam_app_id = manifest.steam_app_id,
+                            .game = manifest.game,
+                            .game_directory = manifest.game_directory,
+                            .provider = manifest.provider,
+                            .provider_product_id = product_id,
+                            .source_state = source_state,
+                            .mapping = manifest.mapping,
+                            .catalog_count = manifest.catalog_count,
+                            .prepared_at = manifest.prepared_at,
+                            .capabilities = .{
+                                .detect = true,
+                                .monitor = true,
+                                .map_to_steam = true,
+                                .sync_to_steam = complete,
+                                .popup = true,
+                            },
+                        });
+                        allocator.free(refreshed_path);
+                    }
+                    try games.append(allocator, .{
+                        .app_id = app.app_id,
+                        .name = app.name,
+                        .directory = app.install_dir,
+                        .provider = "uplay_r2",
+                        .confidence = 100,
+                        .achievement_count = manifest.catalog_count,
+                        .state_available = complete,
+                        .status = if (complete) "COMPLETO" else "AGUARDA DADOS",
+                        .provider_product_id = product_id,
+                    });
+                    continue;
+                }
+            }
+
             const state_available = !std.mem.eql(u8, provider, "rockstar") or
                 hasRockstarState(rockstar_candidates.items.items, app.app_id);
             var achievement_count: ?usize = null;
@@ -292,6 +354,95 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         try writeSuccess(allocator, writer, request.id, .{ .games = games.items });
         return;
     }
+    if (std.mem.eql(u8, request.method, "prepare_game_support")) {
+        const app_id = request.params.app_id orelse return error.MissingAppId;
+        const steam_root = try state.getSteamRoot();
+        var catalog = try bridge.detector.steam_install.discover(allocator, state.io, steam_root);
+        defer catalog.deinit();
+        const app = catalog.findByAppId(app_id) orelse return error.SteamAppNotInstalled;
+        const diagnostic = try bridge.providers.uplay_r2.diagnostic.diagnose(allocator, state.io, app.install_dir);
+        if (!diagnostic.loader_found) return error.UplayR2LoaderNotFound;
+
+        var session = try state.connectSession(app_id);
+        defer session.close();
+        try session.client.loadCurrentUserStats(state.io, app_id, 10_000);
+        var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
+        defer achievements.deinit();
+        if (achievements.items.items.len == 0) return error.SteamAchievementCatalogEmpty;
+        const schema_bytes = try bridge.providers.uplay_r2.schema.renderSteamCatalog(allocator, achievements.items.items);
+        defer allocator.free(schema_bytes);
+        const schema_path = try std.fs.path.join(allocator, &.{ app.install_dir, "achievements_schema.json" });
+        try backupFileOnce(allocator, state.io, schema_path);
+        try writeAtomic(state.io, schema_path, schema_bytes);
+
+        const config_path = try uplayConfigPath(allocator, state.io, app.install_dir);
+        const config_bytes = std.Io.Dir.cwd().readFileAlloc(state.io, config_path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
+            error.FileNotFound => try bridge.providers.uplay_r2.schema.defaultConfig(allocator),
+            else => return err,
+        };
+        defer allocator.free(config_bytes);
+        const enabled_config = bridge.providers.uplay_r2.schema.enableAchievements(allocator, config_bytes) catch |err| switch (err) {
+            error.MissingAchievementsSetting => try bridge.providers.uplay_r2.schema.defaultConfig(allocator),
+            else => return err,
+        };
+        defer allocator.free(enabled_config);
+        try backupFileOnce(allocator, state.io, config_path);
+        try writeAtomic(state.io, config_path, enabled_config);
+
+        var correlation_since = unixNow(state.io);
+        if (try bridge.game_support.load(allocator, state.io, state.monitor.support_root, app_id)) |prior_value| {
+            var prior = prior_value;
+            correlation_since = prior.value().prepared_at;
+            prior.deinit();
+        }
+        var product_id = try bridge.game_support.readUplayProductId(allocator, state.io, app.install_dir);
+        if (product_id == null) product_id =
+            try bridge.game_support.findRecentUnclaimedUplayProductId(
+                allocator,
+                state.io,
+                state.monitor.support_root,
+                state.monitor.r2_roots,
+                app.app_id,
+                correlation_since,
+            );
+        const source_state = if (product_id) |id|
+            try bridge.game_support.findSourceState(allocator, state.io, state.monitor.r2_roots, id)
+        else
+            null;
+        defer if (source_state) |path| allocator.free(path);
+        const complete = product_id != null and source_state != null;
+        const manifest_path = try bridge.game_support.save(allocator, state.io, state.monitor.support_root, .{
+            .steam_app_id = app_id,
+            .game = app.name,
+            .game_directory = app.install_dir,
+            .provider = "uplay_r2",
+            .provider_product_id = product_id,
+            .source_state = source_state,
+            .mapping = "numeric_suffix",
+            .catalog_count = achievements.items.items.len,
+            .prepared_at = unixNow(state.io),
+            .capabilities = .{
+                .detect = true,
+                .monitor = true,
+                .map_to_steam = true,
+                .sync_to_steam = complete,
+                .popup = true,
+            },
+        });
+        defer allocator.free(manifest_path);
+        try writeSuccess(allocator, writer, request.id, .{
+            .app_id = app_id,
+            .game = app.name,
+            .provider = "uplay_r2",
+            .provider_product_id = product_id,
+            .achievement_count = achievements.items.items.len,
+            .schema_path = schema_path,
+            .config_path = config_path,
+            .manifest_path = manifest_path,
+            .status = if (complete) "COMPLETO" else "AGUARDA DADOS",
+        });
+        return;
+    }
     if (std.mem.eql(u8, request.method, "preview_achievement")) {
         try state.recoverPendingPreview();
         const app_id = request.params.app_id orelse return error.MissingAppId;
@@ -308,25 +459,25 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
         defer achievements.deinit();
         const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
-        if (achievement.unlocked) return error.AchievementAlreadyUnlockedForPreview;
-        try bridge.steam.preview_transaction.save(
-            allocator,
-            state.io,
-            state.preview_transaction_path,
-            app_id,
-            achievement.api_name,
-            unixNow(state.io),
-        );
-        try bridge.steam.adapter.previewAchievementUnlock(&session, allocator, state.io, achievement.api_name, duration_ms);
-        try bridge.steam.preview_transaction.clear(state.io, state.preview_transaction_path);
+        const now = unixNow(state.io);
+        var notifier = try bridge.notifications.windows.Notifier.init();
+        defer notifier.deinit();
+        try notifier.show(allocator, .{
+            .app_id = app_id,
+            .source_id = achievement.api_name,
+            .provider = .steam,
+            .unlocked_at = now,
+            .detected_at = now,
+        }, achievement.name, achievement.description, achievement.global_percent);
+        try std.Io.sleep(state.io, .fromMilliseconds(@min(duration_ms, 2_000)), .awake);
         try writeSuccess(allocator, writer, request.id, .{
             .app_id = app_id,
             .achievement = achievement.api_name,
             .name = achievement.name,
-            .native_unlock_toast = true,
-            .temporary_unlock_stored = true,
-            .rollback_stored = true,
-            .state_after = "locked",
+            .preview_mode = "bridge_notification",
+            .native_unlock_toast = false,
+            .steam_state_changed = false,
+            .state_after = if (achievement.unlocked) "unlocked" else "locked",
         });
         return;
     }
@@ -370,11 +521,14 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
             try verifyRuneUnlock(state, allocator, app_id, wanted);
         } else if (std.mem.eql(u8, provider, "rockstar")) {
             try verifyRockstarUnlock(state, allocator, app_id, wanted);
+        } else if (std.mem.eql(u8, provider, "uplay_r2")) {
+            try verifyUplayR2Unlock(state, allocator, app_id, wanted);
         } else {
             return error.UnsupportedSyncProvider;
         }
 
         var direct_error: ?[]const u8 = null;
+        var canonical_achievement = wanted;
         if (state.connectSession(app_id)) |connected| {
             var session = connected;
             defer session.close();
@@ -383,6 +537,7 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
                 defer achievements.deinit();
                 const achievement = findAchievement(achievements.items.items, wanted) orelse
                     return error.AchievementNotFound;
+                canonical_achievement = try allocator.dupe(u8, achievement.api_name);
                 if (bridge.steam.adapter.unlockAchievement(
                     &session,
                     allocator,
@@ -410,7 +565,7 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
 
         var local = try bridge.steam.live_sync.sync(allocator, state.io, .{
             .app_id = app_id,
-            .api_name = wanted,
+            .api_name = canonical_achievement,
             .unlock_time = request.params.timestamp orelse @intCast(unixNow(state.io)),
             .steam_root = try state.getSteamRoot(),
             .backup_root = state.monitor.backup_root,
@@ -419,7 +574,7 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         defer local.deinit();
         try writeSuccess(allocator, writer, request.id, .{
             .app_id = app_id,
-            .achievement = wanted,
+            .achievement = canonical_achievement,
             .provider = provider,
             .route = "steam_local_cache",
             .direct_error = direct_error,
@@ -598,8 +753,65 @@ fn verifyRockstarUnlock(state: *State, allocator: std.mem.Allocator, app_id: u32
     return error.RockstarAchievementNotFound;
 }
 
+fn verifyUplayR2Unlock(state: *State, allocator: std.mem.Allocator, app_id: u32, api_name: []const u8) !void {
+    var loaded = (try bridge.game_support.load(allocator, state.io, state.monitor.support_root, app_id)) orelse
+        return error.SupportManifestNotFound;
+    defer loaded.deinit();
+    const manifest = loaded.value();
+    const product_id = manifest.provider_product_id orelse
+        (try bridge.game_support.readUplayProductId(allocator, state.io, manifest.game_directory)) orelse
+        return error.UplayProductIdNotAvailable;
+    var candidates = try bridge.gse.discovery.discover(allocator, state.io, state.monitor.r2_roots);
+    defer candidates.deinit();
+    for (candidates.items.items) |candidate| {
+        if (candidate.app_id != product_id) continue;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(state.io, candidate.state_file, allocator, .limited(16 * 1024 * 1024));
+        defer allocator.free(bytes);
+        var snapshot = try bridge.gse.snapshot.parse(allocator, bytes);
+        defer snapshot.deinit();
+        const source_id = numericSuffix(api_name) orelse api_name;
+        const achievement = snapshot.achievements.get(source_id) orelse return error.UplayAchievementNotFound;
+        if (!achievement.earned) return error.UplayAchievementNotUnlocked;
+        return;
+    }
+    return error.UplayStateNotFound;
+}
+
 fn unixNow(io: std.Io) i64 {
     return @intCast(@divTrunc(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
+}
+
+fn uplayConfigPath(allocator: std.mem.Allocator, io: std.Io, game_dir: []const u8) ![]u8 {
+    for ([_][]const u8{ "upc_r2.ini", "uplay_r2.ini" }) |name| {
+        const path = try std.fs.path.join(allocator, &.{ game_dir, name });
+        std.Io.Dir.cwd().access(io, path, .{}) catch {
+            allocator.free(path);
+            continue;
+        };
+        return path;
+    }
+    return std.fs.path.join(allocator, &.{ game_dir, "upc_r2.ini" });
+}
+
+fn backupFileOnce(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(32 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer allocator.free(bytes);
+    const backup_path = try std.fmt.allocPrint(allocator, "{s}.achievement-bridge.bak", .{path});
+    defer allocator.free(backup_path);
+    std.Io.Dir.cwd().access(io, backup_path, .{}) catch {
+        try writeAtomic(io, backup_path, bytes);
+        return;
+    };
+}
+
+fn writeAtomic(io: std.Io, path: []const u8, bytes: []const u8) !void {
+    var atomic = try std.Io.Dir.cwd().createFileAtomic(io, path, .{ .make_path = true, .replace = true });
+    defer atomic.deinit(io);
+    try atomic.file.writePositionalAll(io, bytes, 0);
+    try atomic.replace(io);
 }
 
 fn monitorWorker(context: *const bridge.host.all_watchers.Context) void {
@@ -615,4 +827,22 @@ test "support classification distinguishes native, full, and detected providers"
     try std.testing.expectEqualStrings("SÓ DETECTA", classifySupport("ubisoft", 90, null, true));
     try std.testing.expectEqualStrings("NATIVO", classifySupport("steam", 75, null, true));
     try std.testing.expectEqualStrings("SEM SUPORTE", classifySupport("epic", 85, null, true));
+}
+
+test "provider objective resolves to canonical Steam API name" {
+    const achievements = [_]bridge.steam.user_stats.AchievementState{
+        .{
+            .api_name = @constCast("Outlaws_Ach_19"),
+            .name = @constCast("The heavier they fall"),
+            .description = @constCast(""),
+            .icon = @constCast(""),
+            .icon_gray = @constCast(""),
+            .unlocked = false,
+            .unlock_time = 0,
+            .hidden = false,
+            .global_percent = null,
+        },
+    };
+    const achievement = findAchievement(&achievements, "19") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("Outlaws_Ach_19", achievement.api_name);
 }

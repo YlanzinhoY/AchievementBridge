@@ -14,7 +14,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,8 +34,8 @@ except ImportError:  # pragma: no cover - the packaged application is Windows-on
     winreg = None  # type: ignore[assignment]
 
 
-SUPPORTED_SYNC_PROVIDERS = ("gse", "rune", "rockstar")
-MONITORED_PROVIDERS = ("ubisoft", "uplay_r2")
+SUPPORTED_SYNC_PROVIDERS = ("gse", "rune", "rockstar", "uplay_r2")
+MONITORED_PROVIDERS = ("ubisoft",)
 PROVIDER_PRIORITY = ("gse", "rune", "rockstar", "uplay_r2", "ubisoft", "steam", "epic", "gog", "ea", "xbox")
 DEFAULT_NOTIFICATION_PREVIEW_MS = 7000
 MIN_NOTIFICATION_PREVIEW_MS = 1000
@@ -260,8 +259,6 @@ def api_start_arguments(api: Path, bridge: Path, steam_root: str | None) -> list
         str(api),
         "--core",
         str(bridge),
-        "--parent-pid",
-        str(os.getpid()),
     ]
     if steam_root:
         arguments += ["--steam-root", steam_root]
@@ -494,7 +491,7 @@ def notification_preview_arguments(
     duration_ms: int = DEFAULT_NOTIFICATION_PREVIEW_MS,
     wait_for_game_dir: str | None = None,
 ) -> list[str]:
-    """Build an explicitly confirmed temporary unlock/rollback request."""
+    """Build a safe Bridge notification preview request."""
     api_name = achievement.strip()
     if app_id <= 0:
         raise RuntimeError("o AppID precisa ser maior que zero")
@@ -513,7 +510,6 @@ def notification_preview_arguments(
         str(app_id),
         "--achievement",
         api_name,
-        "--confirm-steam-write",
         "--duration-ms",
         str(duration_ms),
     ]
@@ -546,9 +542,7 @@ def request_notification_preview(
     }
     if wait_for_game_dir is not None:
         payload["wait_for_game_dir"] = wait_for_game_dir
-    # The transaction can wait for Steam's StoreStats rate limiter. Zig owns
-    # the unlock and rollback state; the UI only waits for the final result.
-    timeout = None if wait_for_game_dir is not None else max(300, duration_ms // 1000 + 270)
+    timeout = None if wait_for_game_dir is not None else max(30, duration_ms // 1000 + 15)
     return api_client(bridge, steam_root).request(
         "POST",
         "/v1/achievement-previews",
@@ -659,6 +653,15 @@ def read_available_achievements(bridge: Path, app_id: int, steam_root: str | Non
     return achievements
 
 
+def prepare_game_support(bridge: Path, app_id: int, steam_root: str | None) -> dict[str, object]:
+    return api_client(bridge, steam_root).request(
+        "POST",
+        f"/v1/games/{app_id}/support",
+        {},
+        timeout=180,
+    )
+
+
 def inspect_installed_games(bridge: Path, steam_root: str | None, verify_schema: bool = True) -> list[SupportReport]:
     result = api_client(bridge, steam_root).request(
         "GET",
@@ -719,7 +722,7 @@ def print_game_table(reports: list[SupportReport]) -> None:
     console.print("[bold green]COMPLETO[/]  Bridge detecta e sincroniza com a Steam")
     console.print("[cyan]NATIVO[/]    O próprio jogo usa Steamworks; não precisa do Bridge")
     console.print("[yellow]SÓ DETECTA[/] O Bridge vê o evento, mas a CLI ainda não sincroniza sozinha")
-    console.print("[yellow]AGUARDA DADOS[/] Rockstar detectado; aguardando um estado local de conquistas legível")
+    console.print("[yellow]AGUARDA DADOS[/] Integração preparada; abra o jogo para criar o estado de conquistas")
     console.print("[yellow]SEM CATÁLOGO[/] O provedor existe, mas a Steam não retornou conquistas")
     console.print("[red]SEM SUPORTE[/] Provedor de conquistas ainda não implementado")
 
@@ -976,10 +979,15 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
             achievement = achievements[int(selected_achievement) - 1]
             try:
                 with console.status(
-                    "[cyan]Solicitando o toast nativo e aguardando a Steam confirmar o rollback...[/]",
+                    "[cyan]Exibindo uma prévia segura do popup...[/]",
                     spinner="dots",
                 ):
-                    request_notification_preview(bridge, game.app_id, achievement.api_name, args.steam_root)
+                    preview_result = request_notification_preview(
+                        bridge,
+                        game.app_id,
+                        achievement.api_name,
+                        args.steam_root,
+                    )
             except RuntimeError as error:
                 achievement_notice = (
                     str(error),
@@ -987,12 +995,11 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
                     "red",
                 )
             else:
-                achievement_notice = (
-                    f"Toast nativo exibido para [bold]{achievement.name}[/].\n"
-                    "O rollback foi confirmado; escolha outra conquista para continuar testando.",
-                    "[bold green]Simulação concluída[/]",
-                    "green",
+                message = (
+                    f"Popup do Achievement Bridge exibido para [bold]{achievement.name}[/].\n"
+                    "Nenhum estado de conquista foi alterado na Steam."
                 )
+                achievement_notice = (message, "[bold green]Simulação concluída[/]", "green")
 
 
 def interactive_menu(args: CliOptions, bridge: Path) -> int:
@@ -1000,105 +1007,69 @@ def interactive_menu(args: CliOptions, bridge: Path) -> int:
     while True:
         clear_screen()
         print_status(bridge)
-        if other_bridge_process_exists():
-            console.print(Panel(
-                "O Bridge já está ativo. Feche a outra instância antes de iniciar por este menu.",
-                border_style="yellow",
-            ))
         actions = Table.grid(padding=(0, 2))
         actions.add_column(style="bold bright_cyan", justify="right")
         actions.add_column()
         actions.add_row("1", "Ativar Bridge e acompanhar logs")
-        actions.add_row("2", "Ver jogos compatíveis")
-        actions.add_row("3", "Ver conquistas disponíveis")
-        actions.add_row("4", "Simular popup da Steam")
-        actions.add_row("5", "Atualizar status")
+        actions.add_row("2", "Desativar Bridge")
+        actions.add_row("3", "Ver jogos compatíveis")
+        actions.add_row("4", "Ver conquistas disponíveis")
+        actions.add_row("5", "Simular popup da Steam")
+        actions.add_row("6", "Atualizar status")
         actions.add_row("0", "Sair")
         console.print(Panel(actions, title="[bold]O que você quer fazer?[/]", border_style="cyan"))
         try:
             choice = Prompt.ask(
                 "[bold]Escolha uma opção[/]",
-                choices=("1", "2", "3", "4", "5", "0"),
+                choices=("1", "2", "3", "4", "5", "6", "0"),
                 show_choices=False,
                 show_default=False,
             )
         except (EOFError, KeyboardInterrupt):
             return 0
         if choice == "1":
-            if other_bridge_process_exists():
-                console.input("\n[yellow]Já existe um Bridge ativo.[/] Pressione Enter para voltar...")
-                continue
             clear_screen()
             print_banner()
             console.print(Panel(
                 "[bold green]Bridge ativado.[/] Abra seu jogo normalmente.\n"
-                "Os eventos aparecerão abaixo. Pressione [bold]Ctrl+C[/] para voltar ao menu.",
+                "Os eventos aparecerão abaixo. Pressione [bold]Ctrl+C[/] para voltar ao menu; "
+                "o Bridge continuará ativo.",
                 border_style="green",
             ))
             start_monitor(menu_start_options(args), bridge)
         elif choice == "2":
+            api_client(bridge, args.steam_root).shutdown()
+            console.print(Panel("Bridge desativado.", border_style="yellow"))
+            time.sleep(1)
+        elif choice == "3":
             clear_screen()
             print_banner()
             console.print("\n[dim]Analisando a biblioteca Steam...[/]\n")
             reports = inspect_installed_games(bridge, args.steam_root, verify_schema=True)
             print_game_table(reports)
             console.input("\nPressione Enter para voltar...")
-        elif choice == "3":
-            show_available_achievements(args, bridge)
         elif choice == "4":
-            exit_on_failure(lambda: simulate_popup(args, bridge))
+            show_available_achievements(args, bridge)
         elif choice == "5":
+            exit_on_failure(lambda: simulate_popup(args, bridge))
+        elif choice == "6":
             continue
         elif choice == "0":
             return 0
 
 
-def sync_event(bridge: Path, event: AchievementEvent, steam_root: str | None, native_toast: bool, log: LogSink) -> None:
-    if event.app_id is None:
-        log.write(f"SYNC IGNORADO provider={event.provider}: evento sem Steam AppID")
-        return
-    if event.provider not in SUPPORTED_SYNC_PROVIDERS:
-        log.write(f"SYNC PENDENTE appid={event.app_id} provider={event.provider}: mapeamento standalone ainda indisponível")
-        return
-
-    payload: dict[str, object] = {
-        "app_id": event.app_id,
-        "achievement": event.achievement,
-        "provider": event.provider,
-        "native_toast": native_toast,
-    }
-    if event.timestamp and event.timestamp > 0:
-        payload["timestamp"] = event.timestamp
-    try:
-        result = api_client(bridge, steam_root).request(
-            "POST",
-            "/v1/achievement-syncs",
-            payload,
-            timeout=180,
-        )
-    except (ConnectionError, RuntimeError) as error:
-        log.write(
-            f"STEAM FALHOU appid={event.app_id} achievement={event.achievement} error={error}"
-        )
-        return
-    route = result.get("route", "unknown")
-    log.write(
-        f"STEAM OK appid={event.app_id} achievement={event.achievement} "
-        f"route={route} result={json.dumps(result, ensure_ascii=False, separators=(',', ':'))}"
-    )
-
-
 def start_monitor(args: MonitorOptions, bridge: Path) -> int:
-    if other_bridge_process_exists() and not args.allow_duplicate:
-        print("Já existe um Achievement Bridge rodando (provavelmente iniciado pelo LuaTools).")
-        print("Feche o LuaTools ou use --allow-duplicate conscientemente.")
-        return 2
-
     # Starting the Bridge means the public local API must be available too.
     # The gateway owns the only persistent Zig core and streams its events back
     # to this interface, avoiding a second watch-all process.
     client = api_client(bridge, args.steam_root)
     client.ensure_started()
+    health = client.request("GET", "/v1/health", timeout=2)
+    already_monitoring = bool(health.get("core", {}).get("monitoring", False))
+    if not already_monitoring and other_bridge_process_exists() and not args.allow_duplicate:
+        print("Já existe outro Achievement Bridge rodando (provavelmente iniciado pelo LuaTools).")
+        print("Feche a outra instância ou use --allow-duplicate conscientemente.")
+        return 2
 
     log_path = None if args.no_file_log else Path(args.log or default_log_path())
     log = LogSink(log_path)
@@ -1118,6 +1089,7 @@ def start_monitor(args: MonitorOptions, bridge: Path) -> int:
         "interval_ms": args.interval_ms,
         "recover": True,
         "notifications": not args.no_notifications,
+        "native_toast": args.native_toast,
     }
     if args.journal:
         monitor_request["journal_path"] = args.journal
@@ -1127,7 +1099,6 @@ def start_monitor(args: MonitorOptions, bridge: Path) -> int:
     if log_path:
         log.write(f"LOG arquivo={log_path}")
     parser = EventParser()
-    workers = ThreadPoolExecutor(max_workers=2, thread_name_prefix="steam-sync")
     last_session_heartbeat: str | None = None
     try:
         for line in client.stream_monitor_events():
@@ -1142,15 +1113,12 @@ def start_monitor(args: MonitorOptions, bridge: Path) -> int:
                     f"CONQUISTA provider={event.provider} appid={event.app_id} "
                     f"achievement={event.achievement} recovered={event.recovered}"
                 )
-                workers.submit(sync_event, bridge, event, args.steam_root, args.native_toast, log)
         log.write("ENCERRADO stream de eventos finalizado")
         return 0
     except KeyboardInterrupt:
-        log.write("ENCERRANDO solicitado pelo usuário")
-        client.shutdown()
+        log.write("LOGS encerrados; Bridge continua ativo em segundo plano")
         return 0
     finally:
-        workers.shutdown(wait=True, cancel_futures=False)
         log.close()
 
 
@@ -1287,6 +1255,24 @@ def achievements_command(
     print_achievement_table(game, achievements)
 
 
+@app.command("prepare-support")
+def prepare_support_command(
+    context: typer.Context,
+    app_id: Annotated[int, typer.Argument(help="Steam AppID do jogo")],
+) -> None:
+    """Prepare e registre a conexão de conquistas de um jogo compatível."""
+    options = get_cli_options(context)
+    bridge = resolve_bridge(options.bridge)
+    result = exit_on_failure(lambda: prepare_game_support(bridge, app_id, options.steam_root))
+    status = str(result.get("status", "AGUARDA DADOS"))
+    game = str(result.get("game", f"AppID {app_id}"))
+    count = result.get("achievement_count", "-")
+    message = f"{game}\n{count} conquistas conectadas\nStatus: {status}"
+    if status == "AGUARDA DADOS":
+        message += "\nAbra o jogo uma vez para o Bridge aprender o identificador do provedor."
+    console.print(Panel(message, title="[bold green]Suporte preparado[/]", border_style="green"))
+
+
 @app.command("simulate-popup")
 def simulate_popup_command(
     context: typer.Context,
@@ -1309,11 +1295,11 @@ def simulate_popup_command(
         typer.Option(help="Pasta do jogo usada por --wait-for-game"),
     ] = None,
 ) -> None:
-    """Exiba o toast real com desbloqueio temporário e rollback."""
+    """Exiba uma prévia segura sem alterar conquistas na Steam."""
     options = get_cli_options(context)
     bridge = resolve_bridge(options.bridge)
     wait_for_game_dir = (game_dir or "") if wait_for_game else None
-    exit_on_failure(lambda: request_notification_preview(
+    result = exit_on_failure(lambda: request_notification_preview(
         bridge,
         app_id,
         achievement,
@@ -1321,9 +1307,12 @@ def simulate_popup_command(
         duration_ms,
         wait_for_game_dir,
     ))
+    details = (
+        f"Popup do Achievement Bridge exibido para [bold]{achievement}[/] (AppID {app_id}).\n"
+        "Nenhum estado de conquista foi alterado na Steam."
+    )
     console.print(Panel(
-        f"Toast nativo solicitado para [bold]{achievement}[/] (AppID {app_id}).\n"
-        "O desbloqueio temporário foi revertido e a conquista voltou a ficar bloqueada.",
+        details,
         title="[bold green]Simulação concluída[/]",
         border_style="green",
     ))
@@ -1358,6 +1347,21 @@ def start_command(
     result = exit_on_failure(lambda: start_monitor(monitor, resolve_bridge(options.bridge)))
     if result:
         raise typer.Exit(result)
+
+
+@app.command("stop")
+def stop_command(context: typer.Context) -> None:
+    """Desative explicitamente o monitor, a API e o núcleo."""
+    options = get_cli_options(context)
+    bridge = resolve_bridge(options.bridge)
+    client = api_client(bridge, options.steam_root)
+    try:
+        client._request_once("GET", "/v1/health", timeout=1)
+    except (ConnectionError, RuntimeError):
+        console.print(Panel("O Bridge já está desligado.", border_style="yellow"))
+        return
+    client.shutdown()
+    console.print(Panel("Bridge desativado.", border_style="yellow"))
 
 
 if __name__ == "__main__":

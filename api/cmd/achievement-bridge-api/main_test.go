@@ -46,3 +46,48 @@ func TestSyncRejectsMissingProvider(t *testing.T) {
 		t.Fatalf("unexpected response: %d %s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestAchievementEventParserRoutesCanonicalEvents(t *testing.T) {
+	parser := &achievementEventParser{}
+	lines := []string{
+		"[AchievementBridge]",
+		"provider=uplay_r2",
+		"appid=2842040",
+		"product_id=64181",
+		"achievement=19",
+		"timestamp=1234",
+		"state=unlocked",
+		"",
+	}
+	var event *achievementEvent
+	for _, line := range lines {
+		if parsed := parser.Push(line); parsed != nil {
+			event = parsed
+		}
+	}
+	if event == nil {
+		t.Fatal("expected an achievement event")
+	}
+	if event.AppID != 2842040 || event.Provider != "uplay_r2" || event.Achievement != "19" {
+		t.Fatalf("unexpected event: %+v", event)
+	}
+	if event.Timestamp == nil || *event.Timestamp != 1234 {
+		t.Fatalf("unexpected timestamp: %+v", event.Timestamp)
+	}
+}
+
+func TestAchievementEventParserRejectsProviderOnlyIdentity(t *testing.T) {
+	parser := &achievementEventParser{}
+	for _, line := range []string{
+		"[AchievementBridge]",
+		"provider=uplay_r2",
+		"product_id=64181",
+		"achievement=19",
+		"state=unlocked",
+		"",
+	} {
+		if event := parser.Push(line); event != nil {
+			t.Fatalf("unexpected event without canonical Steam AppID: %+v", event)
+		}
+	}
+}

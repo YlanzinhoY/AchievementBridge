@@ -2,7 +2,7 @@
 
 Bridge de conquistas Windows-only com núcleo em Zig 0.16.0, API local em Go e interface Typer/Rich em Python. Ele detecta jogos e runtimes, acompanha conquistas locais de GSE/Goldberg, RUNE, Rockstar Social Club, Steam, Ubisoft Connect e Uplay R2-compatible, normaliza os eventos, mantém um journal resiliente e mostra notificações nativas do Windows.
 
-O acesso direto ao `ISteamUserStats` é somente leitura por padrão. As exceções de escrita são o comando manual `steam-unlock`, o simulador transacional de toast e os syncs GSE/RUNE/Rockstar verificados. O simulador e o desbloqueio manual exigem `--confirm-steam-write`; os syncs só prosseguem após reler o save e comprovar o desbloqueio para o mesmo AppID/API name. Separadamente, a integração LuaTools e a CLI standalone sincronizam cada evento real do provider com o cache local da Steam como fallback. Uma tentativa opt-in de toast de progresso do Steam Overlay também está disponível como experimento e é descrita abaixo.
+O acesso direto ao `ISteamUserStats` é somente leitura por padrão. As exceções de escrita são os comandos manuais explicitamente confirmados e os syncs GSE/RUNE/Rockstar/Uplay R2 verificados. A prévia visual nunca escreve na Steam; os syncs só prosseguem após reler o save e comprovar o desbloqueio para o mesmo AppID/API name. A API standalone sincroniza cada evento real do provider com o cache local da Steam como fallback, mesmo quando a CLI não está exibindo os logs. Uma tentativa opt-in de toast de progresso do Steam Overlay também está disponível como experimento e é descrita abaixo.
 
 ## Compilar
 
@@ -17,15 +17,15 @@ Os artefatos serão criados em `zig-out/bin/achievement-bridge.exe`, `zig-out/bi
 
 A interface Python cuida somente de entrada e apresentação. Catálogo, descoberta de jogos e simulação de toast são solicitados à API Go em `127.0.0.1:47650`. O gateway inicia e supervisiona o núcleo Zig persistente, comunicando-se com ele por JSON delimitado por linha em `127.0.0.1:47651`. Apenas o Zig conhece a ABI Steam e controla a sessão durante cada operação completa; o Go traduz o protocolo interno para HTTP/JSON e nenhum dos dois serviços aceita conexões fora do loopback.
 
-Essa divisão evita criar um novo processo Zig a cada clique e deixa uma futura GUI consumir a mesma API sem duplicar regras. Ao ativar o monitor, os providers passam a rodar dentro desse mesmo core e os logs chegam à interface por Server-Sent Events. O estado normal é um processo `achievement-bridge.exe` e um processo `achievement-bridge-api.exe`; a sincronização de um evento também atravessa a API, sem abrir um segundo Zig. O contrato e os limites de cada camada estão detalhados em [`docs/architecture.md`](docs/architecture.md).
+Essa divisão evita criar um novo processo Zig a cada clique e deixa uma futura GUI consumir a mesma API sem duplicar regras. Ao ativar o monitor, os providers passam a rodar dentro desse mesmo core, a API consome e sincroniza os eventos em segundo plano e os logs chegam à interface por Server-Sent Events. O estado normal é um processo `achievement-bridge.exe` e um processo `achievement-bridge-api.exe`; abrir ou fechar a tela de logs não cria nem encerra outro Zig. O contrato e os limites de cada camada estão detalhados em [`docs/architecture.md`](docs/architecture.md).
 
-Quando a CLI inicia esse par, a API acompanha o processo da interface e encerra o core automaticamente se a janela for fechada. Executar `achievement-bridge-api.exe` manualmente, sem `--parent-pid`, mantém o serviço ativo de propósito até `POST /v1/shutdown` ou o encerramento do processo.
+Quando a CLI inicia esse par, ele permanece ativo em segundo plano. `Ctrl+C` fecha apenas a visualização dos logs e sair da CLI fecha somente a interface. O botão **Desativar Bridge**, o comando `bridge-cli.cmd stop` ou `POST /v1/shutdown` encerram explicitamente a API e seu core.
 
 ## CLI aberta
 
 `achievement_bridge_cli.py` é uma interface standalone em Python 3.10+, construída com Typer e Rich.
-Ela inicia o gateway Go quando necessário, mantém os logs visíveis e persistentes, informa qual jogo está ativo, exibe
-a compatibilidade calculada pelo núcleo e sincroniza eventos GSE/RUNE/Rockstar verificados. Ela não contém nem
+Ela inicia o gateway Go quando necessário, mantém os logs visíveis e persistentes, informa qual jogo está ativo e exibe
+a compatibilidade calculada pelo núcleo. A sincronização verificada pertence à API e continua sem a tela aberta. A CLI não contém nem
 depende de código do LuaTools. Na primeira abertura, `bridge-cli.cmd` cria uma `.venv` isolada e instala
 automaticamente a dependência declarada em `requirements-cli.txt`; em uma árvore de fontes também compila o gateway se ele ainda não existir.
 
@@ -38,13 +38,12 @@ go -C api build -o ..\zig-out\bin\achievement-bridge-api.exe .\cmd\achievement-b
 ```
 
 A abertura padrão mostra um menu com o estado da Steam e do Bridge. Escolha `1` para ativar o
-monitor e acompanhar os eventos ao vivo, `2` para consultar a compatibilidade dos jogos instalados,
-`3` para escolher um jogo e ver suas conquistas disponíveis, `4` para simular um popup nativo da
-Steam ou `0` para sair. Nada começa a monitorar até o usuário escolher **Ativar Bridge**.
+monitor e acompanhar os eventos ao vivo, `2` para desativar explicitamente o Bridge, `3` para consultar a compatibilidade dos jogos instalados,
+`4` para escolher um jogo e ver suas conquistas disponíveis, `5` para visualizar uma prévia segura do
+popup do Achievement Bridge ou `0` para sair. Nada começa a monitorar até o usuário escolher **Ativar Bridge**.
 
-Os logs ficam em `%LOCALAPPDATA%\AchievementBridge\bridge-cli.log` e `%LOCALAPPDATA%\AchievementBridge\bridge-api.log`. `Ctrl+C` encerra o monitor
-e volta ao menu. A CLI recusa iniciar uma segunda instância por padrão; feche o LuaTools antes de
-usá-la standalone.
+Os logs ficam em `%LOCALAPPDATA%\AchievementBridge\bridge-cli.log` e `%LOCALAPPDATA%\AchievementBridge\bridge-api.log`. `Ctrl+C` volta ao menu sem
+interromper o monitor. A API de loopback garante uma única instância; use **Desativar Bridge** quando quiser encerrá-la.
 
 Para automação ou uso avançado, o monitor também pode ser iniciado diretamente:
 
@@ -66,7 +65,7 @@ Os estados exibidos são:
 - `COMPLETO`: o Bridge detecta o evento e sincroniza com a Steam;
 - `NATIVO`: Steamworks oficial, portanto o jogo não precisa do Bridge;
 - `SÓ DETECTA`: o evento é detectável, mas a CLI ainda não sincroniza sozinha;
-- `AGUARDA DADOS`: o runtime Rockstar foi identificado e o catálogo Steam está disponível, mas ainda não apareceu um estado local legível;
+- `AGUARDA DADOS`: a integração foi preparada, mas ainda não apareceu um estado local que possa ser associado com segurança ao jogo;
 - `SEM SUPORTE`: runtime sem provider de conquistas implementado.
 
 O catálogo de um jogo também pode ser consultado diretamente pelo AppID:
@@ -81,24 +80,12 @@ Uma prévia visual pode ser solicitada pelo menu ou diretamente pelo API name:
 .\bridge-cli.cmd simulate-popup 2638890 ACHIEVEMENT_050
 ```
 
-O simulador produz o toast real de desbloqueio sem exigir que o jogo esteja aberto. Para uma
-conquista que ainda esteja bloqueada, ele chama `SetAchievement + StoreStats`, aguarda o callback e
-mantém o estado por pelo menos 15 segundos. Em seguida chama `ClearAchievement + StoreStats`, aguarda o
-segundo callback, recarrega os stats e só confirma o teste quando a conquista voltou a ficar
-bloqueada. Conquistas já obtidas não aparecem na seleção e são recusadas pelo núcleo para preservar
-o estado e o timestamp legítimos. O menu é a confirmação explícita da transação; no comando Zig de
-baixo nível é obrigatório informar `--confirm-steam-write`.
-
-Se a Steam entregar um callback atrasado ou aplicar rate limit, cada fase drena callbacks antigos e
-faz até três tentativas controladas. Se o processo falhar depois do `SetAchievement`, o Bridge ainda
-tenta o rollback no bloco de limpeza. Antes do desbloqueio temporário, o core também grava
-`%LOCALAPPDATA%\AchievementBridge\preview-transaction-v1.json`; se o processo ou o Windows for
-interrompido, a próxima inicialização conclui o rollback e só então remove esse registro.
-Durante os poucos segundos da prévia, o desbloqueio é enviado à Steam de verdade; portanto esse modo
-deve ser usado apenas para testes conscientes. O simulador não altera saves nem usa popup do Windows.
-No menu interativo, depois de cada rollback confirmado a CLI atualiza o catálogo e volta diretamente
-à lista de conquistas do mesmo jogo. É possível repetir o teste ou escolher `Trocar de jogo` sem
-retornar ao menu principal.
+O simulador usa o popup nativo do Windows pertencente ao Achievement Bridge, preenchido com nome,
+descrição e raridade obtidos do catálogo Steam. Ele não chama `SetAchievement`, `ClearAchievement` ou
+`StoreStats`, não altera timestamps e pode inclusive visualizar conquistas já obtidas. O toast nativo
+da Steam não é usado na prévia porque ele exige uma mudança real de estado que pode ser persistida ou
+restaurada posteriormente pelo cliente. No menu interativo, a CLI volta diretamente à lista de
+conquistas do mesmo jogo para permitir quantas prévias o usuário desejar.
 Para opcionalmente aguardar um jogo abrir antes da transação:
 
 ```powershell
@@ -142,7 +129,7 @@ formato de releases necessário para atualizações futuras.
 Para gerar uma release local a partir dos fontes:
 
 ```powershell
-.\scripts\build-installer.ps1 -Version 0.1.6
+.\scripts\build-installer.ps1 -Version 0.1.12
 ```
 
 O script compila o núcleo Zig em `ReleaseSafe`, executa a suíte existente, compila o gateway Go, gera o ícone, empacota a CLI e grava o setup,
@@ -150,7 +137,7 @@ o pacote completo e o feed Velopack em `dist`. Para reconstruir com binários Zi
 limpar os artefatos de release anteriores:
 
 ```powershell
-.\scripts\build-installer.ps1 -Version 0.1.6 -SkipZigBuild -SkipGoBuild -CleanReleases
+.\scripts\build-installer.ps1 -Version 0.1.12 -SkipZigBuild -SkipGoBuild -CleanReleases
 ```
 
 As ferramentas de build ficam fixadas em `requirements-build.txt` e `.config/dotnet-tools.json`.
@@ -175,7 +162,7 @@ O comando de compatibilidade `watch-all` mantém GSE, RUNE, Ubisoft oficial e Up
 zig build run -- watch-all --no-notifications
 ```
 
-Na CLI standalone, esses mesmos workers são ativados dentro do core `serve` pela API Go. Os eventos seguem em um único stream SSE e voltam à interface para exibição; a sincronização GSE/RUNE retorna ao mesmo core por uma chamada estruturada. Um worker de sessões também informa quando um executável de jogo abre ou fecha e quais providers foram detectados. Cada acesso Steam continua limitado à duração da operação para evitar que um jogo permaneça incorretamente marcado como aberto.
+Na CLI standalone, esses mesmos workers são ativados dentro do core `serve` pela API Go. A API consome os eventos e solicita a sincronização ao mesmo core por uma chamada estruturada; o stream SSE existe apenas para interfaces exibirem os logs. Um worker de sessões também informa quando um executável de jogo abre ou fecha e quais providers foram detectados. Cada acesso Steam continua limitado à duração da operação para evitar que um jogo permaneça incorretamente marcado como aberto.
 
 A CLI standalone faz a mesma orquestração para GSE/RUNE. O comando verificado GSE também pode ser
 usado diretamente:
@@ -320,6 +307,16 @@ O provider lê `%LOCALAPPDATA%\Ubisoft Game Launcher\spool`; não acessa a conta
 
 ## Uplay R2-compatible
 
+Preparar automaticamente a conexão usando o catálogo oficial já carregado pela Steam:
+
+```powershell
+python achievement_bridge_cli.py prepare-support 2842040
+```
+
+Esse fluxo gera `achievements_schema.json`, habilita o log/estado local e cria um manifesto em `%LOCALAPPDATA%\AchievementBridge\support\games\<SteamAppID>\support.json`. O manifesto registra separadamente as capacidades de detectar, monitorar, mapear, sincronizar e exibir popup. A CLI só mostra `COMPLETO` quando o ProductID do provider, o `achievements.json`, o catálogo e o mapeamento Steam estão presentes; antes da primeira inicialização do jogo, mostra `AGUARDA DADOS`.
+
+O ProductID é aprendido dinamicamente da inicialização real do loader e associado ao Steam AppID pelo manifesto. Portanto, a solução não mantém uma tabela fixa por jogo. API names com sufixo numérico, como `Outlaws_Ach_19` e `ACObsidian_Ach_30`, são convertidos para o objetivo local correspondente e novamente validados antes de qualquer sincronização Steam.
+
 Diagnosticar uma instalação sem modificá-la:
 
 ```powershell
@@ -347,16 +344,16 @@ Quando houver uma versão Steam equivalente, `--appid` habilita o mapper exato p
 zig build run -- uplay-r2-watch --appid 3751950
 ```
 
-É possível conferir o popup nativo real com desbloqueio temporário e rollback:
+É possível conferir o popup seguro do Achievement Bridge sem alterar o estado da Steam:
 
 ```powershell
-zig build run -- notify-test --appid 3751950 --achievement ACObsidian_Ach_10 --confirm-steam-write
+zig build run -- notify-test --appid 3751950 --achievement ACObsidian_Ach_10
 ```
 
 Para disparar essa prévia somente quando o executável do jogo abrir:
 
 ```powershell
-zig build run -- notify-test --appid 3751950 --achievement ACObsidian_Ach_10 --confirm-steam-write --wait-for-game --game-dir "D:\Jogos\MeuJogo"
+zig build run -- notify-test --appid 3751950 --achievement ACObsidian_Ach_10 --wait-for-game --game-dir "D:\Jogos\MeuJogo"
 ```
 
 O número no API name é apenas o ID interno. O popup omite esse detalhe e identifica o percentual lido da Steam como raridade global, não como progresso pessoal.

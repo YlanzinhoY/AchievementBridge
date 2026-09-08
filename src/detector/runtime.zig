@@ -1,5 +1,13 @@
 const std = @import("std");
 
+// Runtime libraries are commonly nested below engine-specific directories.
+// Unreal games, for example, may place Steamworks below
+// Engine/Binaries/ThirdParty/Steamworks/<version>/<architecture>.
+// Keep the scan bounded while allowing those layouts to be detected without
+// maintaining per-game paths.
+const max_general_scan_depth: usize = 5;
+const max_steamworks_scan_depth: usize = 16;
+
 pub const RuntimeKind = enum {
     steamworks,
     gse_compatible,
@@ -63,7 +71,7 @@ pub fn detect(allocator: std.mem.Allocator, io: std.Io, game_dir: []const u8) !R
     defer walker.deinit();
 
     while (try walker.next(io)) |entry| {
-        if (entry.kind == .directory and entry.depth() >= 5) {
+        if (entry.kind == .directory and entry.depth() >= max_steamworks_scan_depth) {
             walker.leave(io);
             continue;
         }
@@ -72,6 +80,11 @@ pub fn detect(allocator: std.mem.Allocator, io: std.Io, game_dir: []const u8) !R
 
         if (eql(name, "steam_api64.dll") or eql(name, "steam_api.dll")) {
             try report.addEvidence(.steamworks, 55);
+        } else if (entry.depth() >= max_general_scan_depth) {
+            // Deep scanning exists for engine-nested Steam API libraries. Other
+            // provider markers remain close to their runtime so unrelated
+            // content and bundled extras cannot become false positives.
+            continue;
         } else if (eql(name, "steam_appid.txt")) {
             try report.addEvidence(.steamworks, 20);
         } else if (eql(name, "configs.main.ini") or eql(name, "configs.user.ini") or eql(name, "configs.app.ini")) {
@@ -189,4 +202,72 @@ test "Rockstar Social Club emulator outranks the bundled Steam API" {
     try std.testing.expectEqual(RuntimeKind.rockstar_social_club, report.runtimes.items[0].kind);
     try std.testing.expectEqual(@as(u8, 100), report.runtimes.items[0].confidence);
     try std.testing.expectEqual(@as(u8, 45), find(&report, .steamworks).?.confidence);
+}
+
+test "detects Steamworks in deeply nested engine directories" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+    defer allocator.free(root);
+
+    const nested = try std.fs.path.join(allocator, &.{
+        root,
+        "Engine",
+        "Binaries",
+        "ThirdParty",
+        "Steamworks",
+        "Steamv151",
+        "Win64",
+    });
+    defer allocator.free(nested);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, nested);
+
+    const dll_path = try std.fs.path.join(allocator, &.{ nested, "steam_api64.dll" });
+    defer allocator.free(dll_path);
+    var file = try std.Io.Dir.cwd().createFile(std.testing.io, dll_path, .{});
+    file.close(std.testing.io);
+
+    var report = try detect(allocator, std.testing.io, root);
+    defer report.deinit();
+    const steamworks = find(&report, .steamworks) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(u8, 55), steamworks.confidence);
+}
+
+test "deep scan ignores unrelated provider configuration" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+    defer allocator.free(root);
+
+    const nested = try std.fs.path.join(allocator, &.{
+        root,
+        "Engine",
+        "Binaries",
+        "ThirdParty",
+        "Steamworks",
+        "Steamv151",
+        "Win64",
+    });
+    defer allocator.free(nested);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, nested);
+
+    const dll_path = try std.fs.path.join(allocator, &.{ nested, "steam_api64.dll" });
+    defer allocator.free(dll_path);
+    var dll = try std.Io.Dir.cwd().createFile(std.testing.io, dll_path, .{});
+    dll.close(std.testing.io);
+
+    const settings = try std.fs.path.join(allocator, &.{ nested, "steam_settings" });
+    defer allocator.free(settings);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, settings);
+    const config_path = try std.fs.path.join(allocator, &.{ settings, "configs.app.ini" });
+    defer allocator.free(config_path);
+    var config = try std.Io.Dir.cwd().createFile(std.testing.io, config_path, .{});
+    config.close(std.testing.io);
+
+    var report = try detect(allocator, std.testing.io, root);
+    defer report.deinit();
+    try std.testing.expect(find(&report, .steamworks) != null);
+    try std.testing.expect(find(&report, .gse_compatible) == null);
 }

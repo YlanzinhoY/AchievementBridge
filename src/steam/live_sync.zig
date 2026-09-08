@@ -1,6 +1,7 @@
 const std = @import("std");
 const adapter = @import("adapter.zig");
 const cloud_ipc = @import("cloud_ipc.zig");
+const cloud_overlay = @import("cloud_overlay.zig");
 const local_cache = @import("local_cache.zig");
 const schema = @import("schema.zig");
 const steam_install = @import("../detector/steam_install.zig");
@@ -214,9 +215,18 @@ pub fn clear(allocator: std.mem.Allocator, io: std.Io, options: ClearOptions) !C
         backup_path = try backup(allocator, io, options.backup_root, options.app_id, stats_name, existing);
         try writeAtomic(io, stats_path, mutation.bytes);
     }
+    const overlay_changed = try cloud_overlay.clearAchievement(
+        allocator,
+        io,
+        options.steam_root,
+        account_id,
+        options.app_id,
+        location.stat_id,
+        location.bit,
+    );
     return .{
         .allocator = allocator,
-        .changed = mutation.changed,
+        .changed = mutation.changed or overlay_changed,
         .account_id = account_id,
         .stat_id = location.stat_id,
         .bit = location.bit,
