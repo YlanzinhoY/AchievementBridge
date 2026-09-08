@@ -47,7 +47,7 @@ The API contains no Steam vtable offsets, cache format logic or provider parsing
 
 The Zig executable remains the authority for Steam and achievement state. In `serve` mode it listens only on `127.0.0.1` and processes control commands serially. The monitor workers run inside this same process after `start_monitor`; Go consumes their canonical achievement envelopes, requests verified synchronization back through the core and publishes the same output as an SSE stream for optional UIs. A Steam session lives for one complete operation, including every callback and rollback, then closes so Steam does not keep the queried AppID associated with the persistent process. Serial control execution prevents overlapping callback queues and `StoreStats` transactions.
 
-Before a toast preview changes Steam state, the core atomically persists a transaction record. A completed rollback removes it. If the process is interrupted, startup recovery reads the record, clears only that explicitly recorded test achievement, waits for Steam confirmation and then deletes the record. This prevents an interrupted visual test from becoming a permanent achievement.
+Toast previews are notification-only: the core reads Steam metadata and asks the Achievement Bridge Windows notifier to render it without calling `SetAchievement`, `ClearAchievement` or `StoreStats`. Startup recovery and the rollback endpoint remain available only to clean transaction records created by older Bridge versions; new previews never create one.
 
 Protocol v1 uses one UTF-8 JSON object per TCP connection, terminated by a newline. The core writes one response and closes the connection.
 

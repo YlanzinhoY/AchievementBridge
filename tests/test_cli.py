@@ -222,7 +222,7 @@ Provider candidates:
         )
         popen.assert_not_called()
 
-    def test_notification_preview_requests_explicit_temporary_write(self) -> None:
+    def test_notification_preview_never_requests_a_steam_write(self) -> None:
         arguments = notification_preview_arguments(
             2638890,
             " ACHIEVEMENT_050 ",
@@ -237,7 +237,7 @@ Provider candidates:
         self.assertIn("--wait-for-game", arguments)
         self.assertNotIn("steam-unlock", arguments)
         self.assertNotIn("steam-local-sync", arguments)
-        self.assertIn("--confirm-steam-write", arguments)
+        self.assertNotIn("--confirm-steam-write", arguments)
         self.assertNotIn("--confirm-local-write", arguments)
 
     def test_notification_preview_requires_game_dir_when_waiting(self) -> None:

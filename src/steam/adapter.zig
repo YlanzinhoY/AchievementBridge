@@ -38,11 +38,6 @@ pub const NotificationRequestResult = enum {
     progress_queued,
 };
 
-pub const PreviewResult = enum {
-    unlock_rolled_back,
-    progress_queued,
-};
-
 pub fn isAchievementUnlocked(session: *const Session, allocator: std.mem.Allocator, api_name: []const u8) !bool {
     if (api_name.len == 0 or api_name.len > 127 or std.mem.indexOfScalar(u8, api_name, 0) != null) return error.InvalidAchievementApiName;
     const api_name_z = try allocator.dupeZ(u8, api_name);
@@ -51,8 +46,7 @@ pub fn isAchievementUnlocked(session: *const Session, allocator: std.mem.Allocat
 }
 
 /// Displays a native 1/2 progress toast without calling SetAchievement or
-/// StoreStats. Sync callers may use it after confirming their durable local
-/// state; the notification-preview command uses it without writing any state.
+/// StoreStats. Sync callers may use it after confirming durable local state.
 pub fn queueAchievementProgressNotification(session: *Session, allocator: std.mem.Allocator, io: std.Io, api_name: []const u8) !void {
     if (api_name.len == 0 or api_name.len > 127 or std.mem.indexOfScalar(u8, api_name, 0) != null) return error.InvalidAchievementApiName;
     const api_name_z = try allocator.dupeZ(u8, api_name);
@@ -108,52 +102,6 @@ pub fn unlockAchievement(session: *Session, allocator: std.mem.Allocator, io: st
     if (!session.client.user_stats.storeStats()) return error.StoreStatsFailed;
     try session.client.waitForStatsStored(io, session.app_id, 10_000);
     return .stored;
-}
-
-/// Triggers Steam's real achievement-unlocked toast and rolls it back. Schemas
-/// that reject SetAchievement fall back to Steam's native 1/2 progress toast,
-/// which changes no achievement state and therefore needs no rollback.
-pub fn previewAchievementUnlock(
-    session: *Session,
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    api_name: []const u8,
-    hold_ms: u32,
-) !PreviewResult {
-    if (api_name.len == 0 or api_name.len > 127 or std.mem.indexOfScalar(u8, api_name, 0) != null) return error.InvalidAchievementApiName;
-    const api_name_z = try allocator.dupeZ(u8, api_name);
-    defer allocator.free(api_name_z);
-
-    try session.client.loadCurrentUserStats(io, session.app_id, 10_000);
-    if (try session.client.user_stats.isAchievementUnlocked(api_name_z))
-        return error.AchievementAlreadyUnlockedForPreview;
-    if (!session.client.user_stats.setAchievement(api_name_z)) {
-        if (!session.client.user_stats.indicateAchievementProgress(api_name_z, 1, 2))
-            return error.AchievementProgressNotificationFailed;
-        return .progress_queued;
-    }
-
-    var rollback_required = true;
-    defer {
-        if (rollback_required) rollbackPreviewAchievement(session, io, api_name_z) catch |err|
-            std.debug.print("[SteamNotificationPreview] emergency_rollback_error={s}\n", .{@errorName(err)});
-    }
-
-    try storePreviewStats(session, io, "unlock");
-    if (!try session.client.user_stats.isAchievementUnlocked(api_name_z))
-        return error.AchievementPreviewUnlockUnconfirmed;
-
-    // Steam rate-limits StoreStats. Waiting between the unlock and rollback
-    // avoids immediately tabling the restoration request.
-    const rollback_delay_ms = @max(hold_ms, preview_minimum_store_interval_ms);
-    try std.Io.sleep(io, .fromMilliseconds(rollback_delay_ms), .awake);
-    try rollbackPreviewAchievement(session, io, api_name_z);
-    rollback_required = false;
-
-    try session.client.loadCurrentUserStats(io, session.app_id, 10_000);
-    if (try session.client.user_stats.isAchievementUnlocked(api_name_z))
-        return error.AchievementPreviewRollbackUnconfirmed;
-    return .unlock_rolled_back;
 }
 
 /// Completes a rollback that was left pending by an interrupted notification

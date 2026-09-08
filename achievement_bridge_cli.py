@@ -491,7 +491,7 @@ def notification_preview_arguments(
     duration_ms: int = DEFAULT_NOTIFICATION_PREVIEW_MS,
     wait_for_game_dir: str | None = None,
 ) -> list[str]:
-    """Build an explicitly confirmed temporary unlock/rollback request."""
+    """Build a safe Bridge notification preview request."""
     api_name = achievement.strip()
     if app_id <= 0:
         raise RuntimeError("o AppID precisa ser maior que zero")
@@ -510,7 +510,6 @@ def notification_preview_arguments(
         str(app_id),
         "--achievement",
         api_name,
-        "--confirm-steam-write",
         "--duration-ms",
         str(duration_ms),
     ]
@@ -543,9 +542,7 @@ def request_notification_preview(
     }
     if wait_for_game_dir is not None:
         payload["wait_for_game_dir"] = wait_for_game_dir
-    # The transaction can wait for Steam's StoreStats rate limiter. Zig owns
-    # the unlock and rollback state; the UI only waits for the final result.
-    timeout = None if wait_for_game_dir is not None else max(300, duration_ms // 1000 + 270)
+    timeout = None if wait_for_game_dir is not None else max(30, duration_ms // 1000 + 15)
     return api_client(bridge, steam_root).request(
         "POST",
         "/v1/achievement-previews",
@@ -982,7 +979,7 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
             achievement = achievements[int(selected_achievement) - 1]
             try:
                 with console.status(
-                    "[cyan]Solicitando o toast nativo e aguardando a Steam confirmar o rollback...[/]",
+                    "[cyan]Exibindo uma prévia segura do popup...[/]",
                     spinner="dots",
                 ):
                     preview_result = request_notification_preview(
@@ -998,16 +995,10 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
                     "red",
                 )
             else:
-                if preview_result.get("preview_mode") == "progress_queued":
-                    message = (
-                        f"Toast nativo de progresso exibido para [bold]{achievement.name}[/].\n"
-                        "O schema bloqueia SetAchievement; nenhum estado foi alterado e não houve rollback."
-                    )
-                else:
-                    message = (
-                        f"Toast nativo de desbloqueio exibido para [bold]{achievement.name}[/].\n"
-                        "O rollback foi confirmado; escolha outra conquista para continuar testando."
-                    )
+                message = (
+                    f"Popup do Achievement Bridge exibido para [bold]{achievement.name}[/].\n"
+                    "Nenhum estado de conquista foi alterado na Steam."
+                )
                 achievement_notice = (message, "[bold green]Simulação concluída[/]", "green")
 
 
@@ -1304,7 +1295,7 @@ def simulate_popup_command(
         typer.Option(help="Pasta do jogo usada por --wait-for-game"),
     ] = None,
 ) -> None:
-    """Exiba o toast real com desbloqueio temporário e rollback."""
+    """Exiba uma prévia segura sem alterar conquistas na Steam."""
     options = get_cli_options(context)
     bridge = resolve_bridge(options.bridge)
     wait_for_game_dir = (game_dir or "") if wait_for_game else None
@@ -1316,16 +1307,10 @@ def simulate_popup_command(
         duration_ms,
         wait_for_game_dir,
     ))
-    if result.get("preview_mode") == "progress_queued":
-        details = (
-            f"Toast nativo de progresso solicitado para [bold]{achievement}[/] (AppID {app_id}).\n"
-            "O schema bloqueia o desbloqueio de teste; nenhum estado foi alterado."
-        )
-    else:
-        details = (
-            f"Toast nativo de desbloqueio solicitado para [bold]{achievement}[/] (AppID {app_id}).\n"
-            "O desbloqueio temporário foi revertido e a conquista voltou a ficar bloqueada."
-        )
+    details = (
+        f"Popup do Achievement Bridge exibido para [bold]{achievement}[/] (AppID {app_id}).\n"
+        "Nenhum estado de conquista foi alterado na Steam."
+    )
     console.print(Panel(
         details,
         title="[bold green]Simulação concluída[/]",

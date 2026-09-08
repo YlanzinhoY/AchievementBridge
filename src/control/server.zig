@@ -459,26 +459,25 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
         defer achievements.deinit();
         const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
-        if (achievement.unlocked) return error.AchievementAlreadyUnlockedForPreview;
-        try bridge.steam.preview_transaction.save(
-            allocator,
-            state.io,
-            state.preview_transaction_path,
-            app_id,
-            achievement.api_name,
-            unixNow(state.io),
-        );
-        const preview = try bridge.steam.adapter.previewAchievementUnlock(&session, allocator, state.io, achievement.api_name, duration_ms);
-        try bridge.steam.preview_transaction.clear(state.io, state.preview_transaction_path);
+        const now = unixNow(state.io);
+        var notifier = try bridge.notifications.windows.Notifier.init();
+        defer notifier.deinit();
+        try notifier.show(allocator, .{
+            .app_id = app_id,
+            .source_id = achievement.api_name,
+            .provider = .steam,
+            .unlocked_at = now,
+            .detected_at = now,
+        }, achievement.name, achievement.description, achievement.global_percent);
+        try std.Io.sleep(state.io, .fromMilliseconds(@min(duration_ms, 2_000)), .awake);
         try writeSuccess(allocator, writer, request.id, .{
             .app_id = app_id,
             .achievement = achievement.api_name,
             .name = achievement.name,
-            .preview_mode = @tagName(preview),
-            .native_unlock_toast = preview == .unlock_rolled_back,
-            .temporary_unlock_stored = preview == .unlock_rolled_back,
-            .rollback_stored = preview == .unlock_rolled_back,
-            .state_after = "locked",
+            .preview_mode = "bridge_notification",
+            .native_unlock_toast = false,
+            .steam_state_changed = false,
+            .state_after = if (achievement.unlocked) "unlocked" else "locked",
         });
         return;
     }
