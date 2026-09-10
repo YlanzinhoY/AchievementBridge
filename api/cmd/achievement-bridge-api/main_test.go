@@ -38,6 +38,20 @@ func TestMonitorRejectsUnsafePollingInterval(t *testing.T) {
 	}
 }
 
+func TestProviderNotificationsAreOptIn(t *testing.T) {
+	if providerNotificationsEnabled(nil) {
+		t.Fatal("provider notifications must default off so Web mode keeps one tray icon")
+	}
+	disabled := false
+	if providerNotificationsEnabled(&disabled) {
+		t.Fatal("explicitly disabled provider notifications must stay off")
+	}
+	enabled := true
+	if !providerNotificationsEnabled(&enabled) {
+		t.Fatal("explicit clients must still be able to enable provider notifications")
+	}
+}
+
 func TestSyncRejectsMissingProvider(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/achievement-syncs", strings.NewReader(`{"app_id":3046600,"achievement":"ACHIEVEMENT_02"}`))
 	recorder := httptest.NewRecorder()
