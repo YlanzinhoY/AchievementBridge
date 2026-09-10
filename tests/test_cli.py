@@ -41,6 +41,58 @@ class CliParsingTests(unittest.TestCase):
         self.assertIn("start", result.stdout)
         self.assertIn("setup", result.stdout)
 
+    def test_api_start_arguments_pass_the_compiled_web_interface(self) -> None:
+        arguments = cli.api_start_arguments(
+            Path("api.exe"),
+            Path("bridge.exe"),
+            "C:\\steam",
+            Path("frontend/dist"),
+        )
+
+        self.assertEqual(
+            [
+                "api.exe",
+                "--core",
+                "bridge.exe",
+                "--steam-root",
+                "C:\\steam",
+                "--web-root",
+                str(Path("frontend/dist")),
+            ],
+            arguments,
+        )
+
+    def test_web_interface_starts_the_local_api_and_opens_its_root(self) -> None:
+        client = MagicMock()
+        client.base_url = "http://127.0.0.1:47650"
+        with (
+            patch.object(cli, "find_web_root", return_value=Path("frontend/dist")),
+            patch.object(cli, "api_client", return_value=client),
+            patch.object(cli.webbrowser, "open_new_tab", return_value=True) as open_browser,
+            patch.object(cli.console, "print"),
+        ):
+            result = cli.open_web_interface(CliOptions(), Path("achievement-bridge.exe"))
+
+        self.assertEqual(0, result)
+        client.ensure_started.assert_called_once_with()
+        client.request.assert_called_once_with("GET", "/v1/health", timeout=3)
+        open_browser.assert_called_once_with("http://127.0.0.1:47650/")
+
+    def test_interface_choice_opens_web_without_entering_terminal_menu(self) -> None:
+        with (
+            patch.object(cli, "clear_screen"),
+            patch.object(cli, "print_banner"),
+            patch.object(cli.console, "print"),
+            patch.object(cli.Prompt, "ask", return_value="2"),
+            patch.object(cli, "open_web_interface", return_value=0) as open_web,
+            patch.object(cli, "interactive_menu") as terminal,
+        ):
+            result = cli.choose_interface(CliOptions(), Path("achievement-bridge.exe"))
+
+        self.assertEqual(0, result)
+        open_web.assert_called_once_with(CliOptions(), Path("achievement-bridge.exe"))
+        terminal.assert_not_called()
+
     def test_configures_cloud_table_without_touching_other_tables(self) -> None:
         configured = configure_opensteamtool(
             '[lua]\npaths = ["config/stplug-in"]\n\n[cloud]\nenabled = false\n'

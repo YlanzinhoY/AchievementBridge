@@ -32,6 +32,7 @@ export interface CoreHealth {
   protocol_version: number
   steam_session_scope: 'request'
   monitoring: boolean
+  stopping: boolean
 }
 
 export interface HealthResponse {
@@ -169,6 +170,11 @@ export interface StartMonitorRequest {
 export interface StartMonitorResponse {
   monitoring: boolean
   interval_ms: number
+}
+
+export interface StopMonitorResponse {
+  monitoring: false
+  stopping: boolean
 }
 
 export interface ShutdownResponse {

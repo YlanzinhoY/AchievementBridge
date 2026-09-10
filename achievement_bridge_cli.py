@@ -14,6 +14,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -43,7 +44,7 @@ MAX_NOTIFICATION_PREVIEW_MS = 60_000
 DEFAULT_API_URL = "http://127.0.0.1:47650"
 console = Console(highlight=False)
 ResultType = TypeVar("ResultType")
-_api_clients: dict[tuple[Path, str | None], "BridgeApiClient"] = {}
+_api_clients: dict[tuple[Path, str | None, Path | None], "BridgeApiClient"] = {}
 _api_clients_lock = threading.Lock()
 
 
@@ -115,9 +116,10 @@ class SteamHostSetup:
 class BridgeApiClient:
     """Typed UI boundary for the local Go control plane."""
 
-    def __init__(self, bridge: Path, steam_root: str | None) -> None:
+    def __init__(self, bridge: Path, steam_root: str | None, web_root: Path | None = None) -> None:
         self.bridge = bridge
         self.steam_root = steam_root
+        self.web_root = web_root
         self.base_url = os.environ.get("ACHIEVEMENT_BRIDGE_API_URL", DEFAULT_API_URL).rstrip("/")
         self._startup_lock = threading.Lock()
 
@@ -143,7 +145,7 @@ class BridgeApiClient:
                 pass
 
             api = find_api(self.bridge)
-            arguments = api_start_arguments(api, self.bridge, self.steam_root)
+            arguments = api_start_arguments(api, self.bridge, self.steam_root, self.web_root)
             log_path = Path(default_api_log_path())
             log_path.parent.mkdir(parents=True, exist_ok=True)
             creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -254,7 +256,12 @@ def find_api(bridge: Path) -> Path:
     )
 
 
-def api_start_arguments(api: Path, bridge: Path, steam_root: str | None) -> list[str]:
+def api_start_arguments(
+    api: Path,
+    bridge: Path,
+    steam_root: str | None,
+    web_root: Path | None = None,
+) -> list[str]:
     arguments = [
         str(api),
         "--core",
@@ -262,15 +269,42 @@ def api_start_arguments(api: Path, bridge: Path, steam_root: str | None) -> list
     ]
     if steam_root:
         arguments += ["--steam-root", steam_root]
+    if web_root is not None:
+        arguments += ["--web-root", str(web_root)]
     return arguments
 
 
+def find_web_root() -> Path:
+    """Locate the built web interface in source trees and packaged releases."""
+    root = application_root()
+    candidates = (
+        os.environ.get("ACHIEVEMENT_BRIDGE_WEB_ROOT"),
+        str(root / "web"),
+        str(root / "frontend" / "dist"),
+    )
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if (path / "index.html").is_file():
+            return path.resolve()
+    raise FileNotFoundError(
+        "a interface Web não foi encontrada; execute 'bun run build' dentro de frontend"
+    )
+
+
 def api_client(bridge: Path, steam_root: str | None) -> BridgeApiClient:
-    key = (bridge, steam_root)
+    try:
+        web_root: Path | None = find_web_root()
+    except FileNotFoundError:
+        # The terminal remains usable in a source checkout before the frontend
+        # is built. Choosing Web reports the actionable build instruction.
+        web_root = None
+    key = (bridge, steam_root, web_root)
     with _api_clients_lock:
         client = _api_clients.get(key)
         if client is None:
-            client = BridgeApiClient(bridge, steam_root)
+            client = BridgeApiClient(bridge, steam_root, web_root)
             _api_clients[key] = client
         return client
 
@@ -1002,6 +1036,55 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
                 achievement_notice = (message, "[bold green]Simulação concluída[/]", "green")
 
 
+def open_web_interface(args: CliOptions, bridge: Path) -> int:
+    """Start the local control plane and hand the user to the compiled Web UI."""
+    # Keep this explicit rather than relying on the API fallback so the Web
+    # selection reports a useful error when a source checkout has no build yet.
+    find_web_root()
+    client = api_client(bridge, args.steam_root)
+    client.ensure_started()
+    health = client.request("GET", "/v1/health", timeout=3)
+    if not bool(health.get("web_ui", False)):
+        raise RuntimeError(
+            "a instância ativa do Bridge foi iniciada sem a interface Web; "
+            "desative o Bridge e abra-o novamente"
+        )
+    address = f"{client.base_url}/"
+    opened = webbrowser.open_new_tab(address)
+    message = f"Interface Web disponível em [link={address}]{address}[/link]"
+    if not opened:
+        message += "\nAbra o endereço acima no seu navegador."
+    console.print(Panel(message, title="[bold green]Modo Web[/]", border_style="green"))
+    return 0
+
+
+def choose_interface(args: CliOptions, bridge: Path) -> int:
+    """Let people choose the presentation layer before opening any UI."""
+    clear_screen()
+    print_banner()
+    choices = Table.grid(padding=(0, 2))
+    choices.add_column(style="bold bright_cyan", justify="right")
+    choices.add_column()
+    choices.add_row("1", "Terminal — menu e logs no console")
+    choices.add_row("2", "Web — painel visual no navegador")
+    choices.add_row("0", "Sair")
+    console.print(Panel(choices, title="[bold]Como você quer usar o Bridge?[/]", border_style="cyan"))
+    try:
+        choice = Prompt.ask(
+            "[bold]Escolha uma interface[/]",
+            choices=("1", "2", "0"),
+            show_choices=False,
+            show_default=False,
+        )
+    except (EOFError, KeyboardInterrupt):
+        return 0
+    if choice == "1":
+        return interactive_menu(args, bridge)
+    if choice == "2":
+        return open_web_interface(args, bridge)
+    return 0
+
+
 def interactive_menu(args: CliOptions, bridge: Path) -> int:
     api_client(bridge, args.steam_root).ensure_started()
     while True:
@@ -1173,7 +1256,7 @@ def application(
     options = CliOptions(bridge=bridge, steam_root=steam_root)
     context.obj = options
     if context.invoked_subcommand is None:
-        result = exit_on_failure(lambda: interactive_menu(options, resolve_bridge(bridge)))
+        result = exit_on_failure(lambda: choose_interface(options, resolve_bridge(bridge)))
         if result:
             raise typer.Exit(result)
 

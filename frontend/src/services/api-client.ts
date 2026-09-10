@@ -13,6 +13,7 @@ import type {
   ShutdownResponse,
   StartMonitorRequest,
   StartMonitorResponse,
+  StopMonitorResponse,
 } from '@/types'
 
 export class ApiRequestError extends Error {
@@ -92,6 +93,13 @@ export class AchievementBridgeClient {
     return this.request<StartMonitorResponse>('/monitor/start', {
       method: 'POST',
       body: JSON.stringify(input),
+      signal,
+    })
+  }
+
+  stopMonitor(signal?: AbortSignal) {
+    return this.request<StopMonitorResponse>('/monitor/stop', {
+      method: 'POST',
       signal,
     })
   }

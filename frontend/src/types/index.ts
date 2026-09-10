@@ -20,6 +20,7 @@ export type {
   ShutdownResponse,
   StartMonitorRequest,
   StartMonitorResponse,
+  StopMonitorResponse,
   SteamAbiSyncResponse,
   SteamLocalCacheSyncResponse,
 } from './api'

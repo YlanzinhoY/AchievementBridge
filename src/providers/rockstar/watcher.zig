@@ -18,6 +18,7 @@ pub const Options = struct {
     recover: bool = true,
     notifications: bool = true,
     steam_root: ?[]const u8 = null,
+    stop_requested: ?*const std.atomic.Value(bool) = null,
 };
 
 const TrackedState = struct {
@@ -84,7 +85,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     defer gtav_state.deinit();
 
     std.debug.print("[RockstarProvider] status=discovering source=social_club\n", .{});
-    while (true) {
+    while (!shouldStop(options.stop_requested)) {
         const apps = if (steam_catalog) |*catalog| catalog.apps.items else &.{};
         var processes = try process_detector.enumerate(allocator);
         defer processes.deinit();
@@ -116,6 +117,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         );
         try std.Io.sleep(io, .fromMilliseconds(options.interval_ms), .awake);
     }
+}
+
+fn shouldStop(stop_requested: ?*const std.atomic.Value(bool)) bool {
+    return if (stop_requested) |flag| flag.load(.acquire) else false;
 }
 
 fn discoverNewStates(

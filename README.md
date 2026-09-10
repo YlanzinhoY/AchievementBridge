@@ -29,18 +29,25 @@ a compatibilidade calculada pelo núcleo. A sincronização verificada pertence 
 depende de código do LuaTools. Na primeira abertura, `bridge-cli.cmd` cria uma `.venv` isolada e instala
 automaticamente a dependência declarada em `requirements-cli.txt`; em uma árvore de fontes também compila o gateway se ele ainda não existir.
 
-No Windows, compile o núcleo e abra a CLI:
+No Windows, compile o núcleo, gere a interface Web e abra a CLI:
 
 ```powershell
 zig build -Doptimize=ReleaseSafe
 go -C api build -o ..\zig-out\bin\achievement-bridge-api.exe .\cmd\achievement-bridge-api
+cd frontend
+bun run build
+cd ..
 .\bridge-cli.cmd
 ```
 
-A abertura padrão mostra um menu com o estado da Steam e do Bridge. Escolha `1` para ativar o
-monitor e acompanhar os eventos ao vivo, `2` para desativar explicitamente o Bridge, `3` para consultar a compatibilidade dos jogos instalados,
-`4` para escolher um jogo e ver suas conquistas disponíveis, `5` para visualizar uma prévia segura do
-popup do Achievement Bridge ou `0` para sair. Nada começa a monitorar até o usuário escolher **Ativar Bridge**.
+A abertura padrão primeiro pergunta qual interface usar: **Terminal** abre o menu Rich com o estado da Steam e do Bridge;
+**Web** inicia a mesma API local e abre `http://127.0.0.1:47650/` no navegador. Nada começa a monitorar até o usuário
+escolher **Ativar Bridge** em uma das interfaces. Os comandos explícitos, como `start`, `games` e `achievements`, continuam
+indo direto ao terminal para automação.
+
+No modo Terminal, escolha `1` para ativar o monitor e acompanhar os eventos ao vivo, `2` para desativar explicitamente o Bridge,
+`3` para consultar a compatibilidade dos jogos instalados, `4` para escolher um jogo e ver suas conquistas disponíveis,
+`5` para visualizar uma prévia segura do popup do Achievement Bridge ou `0` para sair.
 
 Os logs ficam em `%LOCALAPPDATA%\AchievementBridge\bridge-cli.log` e `%LOCALAPPDATA%\AchievementBridge\bridge-api.log`. `Ctrl+C` volta ao menu sem
 interromper o monitor. A API de loopback garante uma única instância; use **Desativar Bridge** quando quiser encerrá-la.
@@ -124,7 +131,8 @@ fallback, com backup atômico.
 ## Instalador Windows
 
 O instalador é gerado com Velopack 1.2.0. A CLI Typer/Rich é congelada em uma pasta standalone pelo
-PyInstaller, portanto o computador do usuário não precisa ter Python, Go, Zig ou .NET instalado. O setup
+PyInstaller e o frontend Solid é copiado já compilado para o gateway Go, portanto o computador do usuário não
+precisa ter Python, Bun, Node, Go, Zig ou .NET instalado. O setup
 é por usuário, cria atalhos no Menu Iniciar e na área de trabalho, registra um desinstalador e já usa o
 formato de releases necessário para atualizações futuras.
 
