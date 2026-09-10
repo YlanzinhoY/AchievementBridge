@@ -65,53 +65,29 @@ class CliParsingTests(unittest.TestCase):
     def test_web_interface_starts_the_local_api_and_opens_its_root(self) -> None:
         client = MagicMock()
         client.base_url = "http://127.0.0.1:47650"
-        client._request_once.side_effect = ConnectionError
         with (
             patch.object(cli, "find_web_root", return_value=Path("frontend/dist")),
             patch.object(cli, "api_client", return_value=client),
             patch.object(cli.webbrowser, "open_new_tab", return_value=True) as open_browser,
-            patch.object(cli, "run_web_tray", return_value=cli.TrayAction.CLOSE_WEB) as tray,
+            patch.object(cli, "launch_web_tray") as launch_tray,
             patch.object(cli.console, "print"),
         ):
             result = cli.open_web_interface(CliOptions(), Path("achievement-bridge.exe"))
 
-        self.assertIs(cli.TrayAction.CLOSE_WEB, result)
+        self.assertEqual(0, result)
         client.ensure_started.assert_called_once_with()
         client.request.assert_called_once_with("GET", "/v1/health", timeout=3)
         open_browser.assert_called_once_with("http://127.0.0.1:47650/")
-        tray.assert_called_once()
-        client.shutdown.assert_called_once_with()
+        launch_tray.assert_called_once_with(CliOptions(), Path("achievement-bridge.exe"))
+        client.shutdown.assert_not_called()
 
     def test_interface_choice_opens_web_without_entering_terminal_menu(self) -> None:
         with (
             patch.object(cli, "clear_screen"),
             patch.object(cli, "print_banner"),
             patch.object(cli.console, "print"),
-            patch.object(cli.Prompt, "ask", side_effect=("2", "0")),
-            patch.object(
-                cli,
-                "open_web_interface",
-                return_value=cli.TrayAction.CLOSE_WEB,
-            ) as open_web,
-            patch.object(cli, "interactive_menu") as terminal,
-        ):
-            result = cli.choose_interface(CliOptions(), Path("achievement-bridge.exe"))
-
-        self.assertEqual(0, result)
-        open_web.assert_called_once_with(CliOptions(), Path("achievement-bridge.exe"))
-        terminal.assert_not_called()
-
-    def test_interface_choice_exits_when_tray_closes_the_bridge(self) -> None:
-        with (
-            patch.object(cli, "clear_screen"),
-            patch.object(cli, "print_banner"),
-            patch.object(cli.console, "print"),
             patch.object(cli.Prompt, "ask", return_value="2") as ask,
-            patch.object(
-                cli,
-                "open_web_interface",
-                return_value=cli.TrayAction.EXIT_BRIDGE,
-            ) as open_web,
+            patch.object(cli, "open_web_interface", return_value=0) as open_web,
             patch.object(cli, "interactive_menu") as terminal,
         ):
             result = cli.choose_interface(CliOptions(), Path("achievement-bridge.exe"))
@@ -120,6 +96,69 @@ class CliParsingTests(unittest.TestCase):
         ask.assert_called_once()
         open_web.assert_called_once_with(CliOptions(), Path("achievement-bridge.exe"))
         terminal.assert_not_called()
+
+    def test_tray_host_keeps_api_until_an_explicit_tray_action(self) -> None:
+        client = MagicMock()
+        client.base_url = "http://127.0.0.1:47650"
+        instance = MagicMock()
+        instance.acquire.return_value = True
+        with (
+            patch.object(cli, "TrayInstance", return_value=instance),
+            patch.object(cli, "api_client", return_value=client),
+            patch.object(cli, "run_web_tray", return_value=cli.TrayAction.EXIT_BRIDGE) as tray,
+            patch.object(cli, "launch_terminal") as terminal,
+        ):
+            result = cli.run_tray_host(CliOptions(), Path("achievement-bridge.exe"))
+
+        self.assertEqual(0, result)
+        tray.assert_called_once()
+        client.shutdown.assert_called_once_with()
+        instance.release.assert_called_once_with()
+        terminal.assert_not_called()
+
+    def test_clicking_the_tray_opens_only_one_terminal_window(self) -> None:
+        client = MagicMock()
+        client.base_url = "http://127.0.0.1:47650"
+        instance = MagicMock()
+        instance.acquire.return_value = True
+        terminal_process = MagicMock()
+        terminal_process.poll.return_value = None
+
+        def click_tray(_address, _open_web, open_terminal):
+            open_terminal()
+            open_terminal()
+            return cli.TrayAction.EXIT_BRIDGE
+
+        with (
+            patch.object(cli, "TrayInstance", return_value=instance),
+            patch.object(cli, "api_client", return_value=client),
+            patch.object(cli, "run_web_tray", side_effect=click_tray),
+            patch.object(cli, "launch_terminal", return_value=terminal_process) as terminal,
+        ):
+            result = cli.run_tray_host(CliOptions(), Path("achievement-bridge.exe"))
+
+        self.assertEqual(0, result)
+        terminal.assert_called_once_with(CliOptions(), Path("achievement-bridge.exe"))
+        client.shutdown.assert_called_once_with()
+
+    def test_closing_web_mode_reopens_the_interface_selector(self) -> None:
+        client = MagicMock()
+        client.base_url = "http://127.0.0.1:47650"
+        instance = MagicMock()
+        instance.acquire.return_value = True
+        with (
+            patch.object(cli, "TrayInstance", return_value=instance),
+            patch.object(cli, "api_client", return_value=client),
+            patch.object(cli, "run_web_tray", return_value=cli.TrayAction.CLOSE_WEB),
+            patch.object(cli, "wait_for_api_shutdown") as wait_for_shutdown,
+            patch.object(cli, "launch_terminal") as terminal,
+        ):
+            result = cli.run_tray_host(CliOptions(), Path("achievement-bridge.exe"))
+
+        self.assertEqual(0, result)
+        client.shutdown.assert_called_once_with()
+        wait_for_shutdown.assert_called_once_with(client)
+        terminal.assert_called_once_with(CliOptions(), Path("achievement-bridge.exe"))
 
     def test_configures_cloud_table_without_touching_other_tables(self) -> None:
         configured = configure_opensteamtool(

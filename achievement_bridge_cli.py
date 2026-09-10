@@ -22,7 +22,7 @@ from typing import Annotated, Callable, Iterable, TextIO, TypeVar
 
 import typer
 import velopack
-from achievement_bridge_tray import TrayAction, run_web_tray
+from achievement_bridge_tray import TrayAction, TrayInstance, run_web_tray
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -1037,8 +1037,93 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
                 achievement_notice = (message, "[bold green]Simulação concluída[/]", "green")
 
 
-def open_web_interface(args: CliOptions, bridge: Path) -> TrayAction:
-    """Start the local control plane and keep its lifecycle available in the tray."""
+def cli_process_arguments(args: CliOptions, bridge: Path, command: str | None = None) -> list[str]:
+    """Build a command that works from source and from the packaged executable."""
+    if getattr(sys, "frozen", False):
+        arguments = [sys.executable]
+    else:
+        arguments = [sys.executable, str(Path(__file__).resolve())]
+    arguments += ["--bridge", str(bridge)]
+    if args.steam_root:
+        arguments += ["--steam-root", args.steam_root]
+    if command:
+        arguments.append(command)
+    return arguments
+
+
+def launch_web_tray(args: CliOptions, bridge: Path) -> subprocess.Popen[bytes]:
+    """Detach the tray owner so closing the launcher cannot stop Web mode."""
+    creation_flags = 0
+    if os.name == "nt":
+        creation_flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+    return subprocess.Popen(
+        cli_process_arguments(args, bridge, "tray-host"),
+        cwd=application_root(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=creation_flags,
+    )
+
+
+def launch_terminal(args: CliOptions, bridge: Path) -> subprocess.Popen[bytes]:
+    """Open the interface selector in a new visible console."""
+    creation_flags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
+    return subprocess.Popen(
+        cli_process_arguments(args, bridge),
+        cwd=application_root(),
+        close_fds=True,
+        creationflags=creation_flags,
+    )
+
+
+def wait_for_api_shutdown(client: BridgeApiClient) -> None:
+    """Avoid racing a new selector against the old Go listener."""
+    for _ in range(50):
+        try:
+            client._request_once("GET", "/v1/health", timeout=0.2)
+        except (ConnectionError, RuntimeError):
+            break
+        time.sleep(0.1)
+
+
+def run_tray_host(args: CliOptions, bridge: Path) -> int:
+    """Own Web mode independently from every visible CLI window."""
+    instance = TrayInstance()
+    if not instance.acquire():
+        return 0
+
+    client = api_client(bridge, args.steam_root)
+    address = f"{client.base_url}/"
+    terminal_lock = threading.Lock()
+    terminal: subprocess.Popen[bytes] | None = None
+
+    def open_terminal_once() -> None:
+        nonlocal terminal
+        with terminal_lock:
+            if terminal is not None and terminal.poll() is None:
+                return
+            terminal = launch_terminal(args, bridge)
+
+    try:
+        action = run_web_tray(
+            address,
+            lambda: webbrowser.open_new_tab(address),
+            open_terminal_once,
+        )
+    finally:
+        instance.release()
+
+    client.shutdown()
+    if action is TrayAction.CLOSE_WEB:
+        wait_for_api_shutdown(client)
+        launch_terminal(args, bridge)
+    return 0
+
+
+def open_web_interface(args: CliOptions, bridge: Path) -> int:
+    """Start Web mode, detach its tray owner and let the visible CLI exit."""
     # Keep this explicit rather than relying on the API fallback so the Web
     # selection reports a useful error when a source checkout has no build yet.
     find_web_root()
@@ -1058,50 +1143,35 @@ def open_web_interface(args: CliOptions, bridge: Path) -> TrayAction:
         message += "\nAbra o endereço acima no seu navegador."
     message += "\nO Bridge continuará disponível no ícone da bandeja do Windows."
     console.print(Panel(message, title="[bold green]Modo Web[/]", border_style="green"))
-    action = run_web_tray(address, open_web)
-    client.shutdown()
-    if action is TrayAction.CLOSE_WEB:
-        # The shutdown response is sent before Go finishes closing its listener.
-        # Wait briefly so choosing either UI again starts a fresh gateway rather
-        # than racing the previous process on the same loopback port.
-        for _ in range(50):
-            try:
-                client._request_once("GET", "/v1/health", timeout=0.2)
-            except (ConnectionError, RuntimeError):
-                break
-            time.sleep(0.1)
-    return action
+    launch_web_tray(args, bridge)
+    return 0
 
 
 def choose_interface(args: CliOptions, bridge: Path) -> int:
     """Let people choose the presentation layer before opening any UI."""
-    while True:
-        clear_screen()
-        print_banner()
-        choices = Table.grid(padding=(0, 2))
-        choices.add_column(style="bold bright_cyan", justify="right")
-        choices.add_column()
-        choices.add_row("1", "Terminal — menu e logs no console")
-        choices.add_row("2", "Web — painel visual no navegador e controle na bandeja")
-        choices.add_row("0", "Sair")
-        console.print(Panel(choices, title="[bold]Como você quer usar o Bridge?[/]", border_style="cyan"))
-        try:
-            choice = Prompt.ask(
-                "[bold]Escolha uma interface[/]",
-                choices=("1", "2", "0"),
-                show_choices=False,
-                show_default=False,
-            )
-        except (EOFError, KeyboardInterrupt):
-            return 0
-        if choice == "1":
-            return interactive_menu(args, bridge)
-        if choice == "2":
-            action = open_web_interface(args, bridge)
-            if action is TrayAction.CLOSE_WEB:
-                continue
-            return 0
+    clear_screen()
+    print_banner()
+    choices = Table.grid(padding=(0, 2))
+    choices.add_column(style="bold bright_cyan", justify="right")
+    choices.add_column()
+    choices.add_row("1", "Terminal — menu e logs no console")
+    choices.add_row("2", "Web — painel visual no navegador e controle na bandeja")
+    choices.add_row("0", "Sair")
+    console.print(Panel(choices, title="[bold]Como você quer usar o Bridge?[/]", border_style="cyan"))
+    try:
+        choice = Prompt.ask(
+            "[bold]Escolha uma interface[/]",
+            choices=("1", "2", "0"),
+            show_choices=False,
+            show_default=False,
+        )
+    except (EOFError, KeyboardInterrupt):
         return 0
+    if choice == "1":
+        return interactive_menu(args, bridge)
+    if choice == "2":
+        return open_web_interface(args, bridge)
+    return 0
 
 
 def interactive_menu(args: CliOptions, bridge: Path) -> int:
@@ -1285,6 +1355,15 @@ def menu_command(context: typer.Context) -> None:
     """Abra o menu interativo e escolha quando ativar o Bridge."""
     options = get_cli_options(context)
     result = exit_on_failure(lambda: interactive_menu(options, resolve_bridge(options.bridge)))
+    if result:
+        raise typer.Exit(result)
+
+
+@app.command("tray-host", hidden=True)
+def tray_host_command(context: typer.Context) -> None:
+    """Run the detached Windows tray owner for Web mode."""
+    options = get_cli_options(context)
+    result = exit_on_failure(lambda: run_tray_host(options, resolve_bridge(options.bridge)))
     if result:
         raise typer.Exit(result)
 
