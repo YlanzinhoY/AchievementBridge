@@ -4,7 +4,7 @@
 
 O Achievement Bridge conecta conquistas locais à Steam no Windows. O foco é ampliar a compatibilidade entre jogos para que a experiência de desbloquear e acompanhar conquistas seja melhor e mais consistente.
 
-Alguns jogos já integram conquistas à Steam naturalmente; outros usam provedores, launchers ou estados locais diferentes. A ideia do Bridge é unificar esses caminhos, detectando eventos compatíveis e apresentando as conquistas em uma experiência única.
+Alguns jogos já integram conquistas à Steam naturalmente; outros usam provedores, launchers ou estados locais diferentes. A ideia do Bridge é unificar esses caminhos para oferecer uma experiência fidedigna.
 
 O projeto reúne um núcleo em Zig, uma API local em Go e interfaces em Python e SolidJS.
 
