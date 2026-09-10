@@ -91,3 +91,24 @@ func TestAchievementEventParserRejectsProviderOnlyIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeAchievementImagesExposesRenderReadyURLs(t *testing.T) {
+	catalog := achievementCatalog{
+		AppID: 3751950,
+		Achievements: []achievement{
+			{Icon: "color.jpg", IconGray: "gray.jpg"},
+			{Icon: "https://example.test/already-absolute.jpg"},
+		},
+	}
+
+	normalizeAchievementImages(catalog.AppID, &catalog)
+	if catalog.Achievements[0].Icon != "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/3751950/color.jpg" {
+		t.Fatalf("unexpected icon URL: %q", catalog.Achievements[0].Icon)
+	}
+	if catalog.Achievements[0].IconGray != "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/3751950/gray.jpg" {
+		t.Fatalf("unexpected gray icon URL: %q", catalog.Achievements[0].IconGray)
+	}
+	if catalog.Achievements[1].Icon != "https://example.test/already-absolute.jpg" {
+		t.Fatalf("absolute image must be preserved: %q", catalog.Achievements[1].Icon)
+	}
+}

@@ -13,7 +13,7 @@ const bridgeSupportedStatuses = new Set([
 
 export function createBridgeDashboard() {
   const [health, { refetch: refetchHealth }] = createResource(() => api.health())
-  const [games, { refetch: refetchGames }] = createResource(() => api.listGames())
+  const [games, { refetch: refetchGames }] = createResource(() => api.listGames(true))
 
   const compatibleGameCount = createMemo(
     () => games()?.games.filter((game) => bridgeSupportedStatuses.has(game.status)).length ?? 0,
@@ -25,6 +25,10 @@ export function createBridgeDashboard() {
     games()?.games.reduce((total, game) => total + (game.achievement_count ?? 0), 0) ?? 0,
   )
 
+  const catalogGameCount = createMemo(
+    () => games()?.games.filter((game) => bridgeSupportedStatuses.has(game.status)).length ?? 0,
+  )
+
   const healthTimer = window.setInterval(() => {
     void refetchHealth()
   }, HEALTH_REFRESH_INTERVAL_MS)
@@ -33,6 +37,7 @@ export function createBridgeDashboard() {
 
   return {
     achievementCount,
+    catalogGameCount,
     compatibleGameCount,
     games,
     health,

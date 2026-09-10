@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path"
@@ -238,7 +239,30 @@ func (a *application) listAchievements(writer http.ResponseWriter, request *http
 		writeCoreError(writer, err)
 		return
 	}
+	normalizeAchievementImages(uint32(appID), &catalog)
 	writeJSON(writer, http.StatusOK, catalog)
+}
+
+func normalizeAchievementImages(appID uint32, catalog *achievementCatalog) {
+	for index := range catalog.Achievements {
+		catalog.Achievements[index].Icon = steamAchievementImageURL(appID, catalog.Achievements[index].Icon)
+		catalog.Achievements[index].IconGray = steamAchievementImageURL(appID, catalog.Achievements[index].IconGray)
+	}
+}
+
+// The Zig core normally returns the absolute CDN URL. Keeping this adapter at
+// the HTTP boundary preserves the public contract for older cores and for
+// Steam clients that still return the original filename display attribute.
+func steamAchievementImageURL(appID uint32, image string) string {
+	image = strings.TrimSpace(image)
+	if image == "" || strings.HasPrefix(image, "https://") || strings.HasPrefix(image, "http://") {
+		return image
+	}
+	return fmt.Sprintf(
+		"https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/%d/%s",
+		appID,
+		url.PathEscape(image),
+	)
 }
 
 func (a *application) previewAchievement(writer http.ResponseWriter, request *http.Request) {

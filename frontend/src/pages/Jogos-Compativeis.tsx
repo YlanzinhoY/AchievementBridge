@@ -1,3 +1,4 @@
+import { A } from '@solidjs/router'
 import { createResource, For, Show } from 'solid-js'
 import { api } from '@/services/api-client'
 import type { GameSupportStatus } from '@/types'
@@ -23,7 +24,7 @@ function statusColor(status: GameSupportStatus) {
 }
 
 export default function GamesPage() {
-  const [games] = createResource(() => api.listGames())
+  const [games] = createResource(() => api.listGames(true))
 
   return (
     <section class="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
@@ -81,7 +82,19 @@ export default function GamesPage() {
                         {game.achievement_count ?? '—'}
                       </td>
 
-                      <td class="px-4 py-3 font-medium">{game.name}</td>
+                      <td class="px-4 py-3 font-medium">
+                        <Show
+                          when={(game.achievement_count ?? 0) > 0}
+                          fallback={game.name}
+                        >
+                          <A
+                            href={`/conquistas/${game.app_id}`}
+                            class="text-primary underline-offset-4 hover:underline"
+                          >
+                            {game.name}
+                          </A>
+                        </Show>
+                      </td>
                     </tr>
                   )}
                 </For>

@@ -4,6 +4,8 @@ import type { ParentProps } from 'solid-js'
 import { BridgeCards } from '@/components/cards'
 import Navbar from '@/components/layout/Navbar'
 import TechStack from '@/components/tech-stack'
+import CatalogoConquistas from '@/pages/CatalogoConquistas'
+import ConquistasDisponiveis from '@/pages/ConquistasDisponiveis'
 import JogosCompativeis from '@/pages/Jogos-Compativeis'
 import Logs from '@/pages/Logs';
 
@@ -36,6 +38,8 @@ function App() {
         path="/jogos-compativeis"
         component={JogosCompativeis}
       />
+      <Route path="/conquistas" component={ConquistasDisponiveis} />
+      <Route path="/conquistas/:appId" component={CatalogoConquistas} />
       <Route
         path="/bridge-logs"
         component={Logs}

@@ -103,10 +103,10 @@ export function BridgeCards() {
         </Card>
       </A>
 
-      <A href="/jogos-compativeis" class="min-w-0 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+      <A href="/conquistas" class="min-w-0 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
         <Card class="h-full min-w-0 cursor-pointer border-primary/25 bg-card transition hover:-translate-y-0.5 hover:border-primary/60 hover:bg-accent/40 hover:shadow-[0_12px_40px_rgba(162,119,255,0.12)]">
           <CardHeader>
-            <CardDescription>Catálogos carregados</CardDescription>
+            <CardDescription>Catálogos detectados</CardDescription>
             <CardTitle>Ver conquistas disponíveis</CardTitle>
           </CardHeader>
           <CardContent>
@@ -118,8 +118,8 @@ export function BridgeCards() {
                 when={!dashboard.games.error}
                 fallback={<span class="text-sm text-destructive">Não foi possível consultar</span>}
               >
-                <strong class="text-2xl text-[#61ffca]">{dashboard.achievementCount()}</strong>
-                <span class="ml-2 text-sm text-muted-foreground">conquistas</span>
+                <strong class="text-2xl text-[#61ffca]">{dashboard.catalogGameCount()}</strong>
+                <span class="ml-2 text-sm text-muted-foreground">catálogos disponíveis</span>
               </Show>
             </Show>
           </CardContent>

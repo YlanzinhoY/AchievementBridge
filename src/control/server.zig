@@ -271,6 +271,7 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         try session.client.loadCurrentUserStats(state.io, app_id, 10_000);
         var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
         defer achievements.deinit();
+        try bridge.steam.user_stats.resolveAchievementImageUrls(&achievements, app_id);
         try writeSuccess(allocator, writer, request.id, .{
             .app_id = app_id,
             .achievements = achievements.items.items,
