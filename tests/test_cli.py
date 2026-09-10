@@ -62,12 +62,39 @@ class CliParsingTests(unittest.TestCase):
             arguments,
         )
 
+    def test_terminal_and_web_use_distinct_gateway_profiles(self) -> None:
+        bridge = Path("achievement-bridge.exe")
+        headless = MagicMock()
+        web = MagicMock()
+        with (
+            patch.object(cli, "_api_clients", {}),
+            patch.object(cli, "find_web_root", return_value=Path("frontend/dist")),
+            patch.object(cli, "BridgeApiClient", side_effect=(headless, web)) as client_type,
+        ):
+            self.assertIs(headless, cli.api_client(bridge, None))
+            self.assertIs(web, cli.api_client(bridge, None, web_ui=True))
+
+        self.assertEqual(None, client_type.call_args_list[0].args[2])
+        self.assertEqual(Path("frontend/dist"), client_type.call_args_list[1].args[2])
+
+    def test_terminal_mode_restarts_a_gateway_serving_the_web_ui(self) -> None:
+        client = MagicMock()
+        client.request.side_effect = ({"web_ui": True}, {"web_ui": False})
+        with patch.object(cli, "wait_for_api_shutdown") as wait_for_shutdown:
+            health = cli.ensure_api_mode(client, web_ui=False)
+
+        self.assertEqual({"web_ui": False}, health)
+        self.assertEqual(2, client.ensure_started.call_count)
+        client.shutdown.assert_called_once_with()
+        wait_for_shutdown.assert_called_once_with(client)
+
     def test_web_interface_starts_the_local_api_and_opens_its_root(self) -> None:
         client = MagicMock()
         client.base_url = "http://127.0.0.1:47650"
         with (
             patch.object(cli, "find_web_root", return_value=Path("frontend/dist")),
             patch.object(cli, "api_client", return_value=client),
+            patch.object(cli, "ensure_api_mode") as ensure_mode,
             patch.object(cli.webbrowser, "open_new_tab", return_value=True) as open_browser,
             patch.object(cli, "launch_web_tray") as launch_tray,
             patch.object(cli.console, "print"),
@@ -75,8 +102,7 @@ class CliParsingTests(unittest.TestCase):
             result = cli.open_web_interface(CliOptions(), Path("achievement-bridge.exe"))
 
         self.assertEqual(0, result)
-        client.ensure_started.assert_called_once_with()
-        client.request.assert_called_once_with("GET", "/v1/health", timeout=3)
+        ensure_mode.assert_called_once_with(client, web_ui=True)
         open_browser.assert_called_once_with("http://127.0.0.1:47650/")
         launch_tray.assert_called_once_with(CliOptions(), Path("achievement-bridge.exe"))
         client.shutdown.assert_not_called()
@@ -116,30 +142,25 @@ class CliParsingTests(unittest.TestCase):
         instance.release.assert_called_once_with()
         terminal.assert_not_called()
 
-    def test_clicking_the_tray_opens_only_one_terminal_window(self) -> None:
+    def test_clicking_the_tray_switches_to_terminal_mode(self) -> None:
         client = MagicMock()
         client.base_url = "http://127.0.0.1:47650"
         instance = MagicMock()
         instance.acquire.return_value = True
-        terminal_process = MagicMock()
-        terminal_process.poll.return_value = None
-
-        def click_tray(_address, _open_web, open_terminal):
-            open_terminal()
-            open_terminal()
-            return cli.TrayAction.EXIT_BRIDGE
 
         with (
             patch.object(cli, "TrayInstance", return_value=instance),
             patch.object(cli, "api_client", return_value=client),
-            patch.object(cli, "run_web_tray", side_effect=click_tray),
-            patch.object(cli, "launch_terminal", return_value=terminal_process) as terminal,
+            patch.object(cli, "run_web_tray", return_value=cli.TrayAction.OPEN_TERMINAL),
+            patch.object(cli, "wait_for_api_shutdown") as wait_for_shutdown,
+            patch.object(cli, "launch_terminal") as terminal,
         ):
             result = cli.run_tray_host(CliOptions(), Path("achievement-bridge.exe"))
 
         self.assertEqual(0, result)
-        terminal.assert_called_once_with(CliOptions(), Path("achievement-bridge.exe"))
         client.shutdown.assert_called_once_with()
+        wait_for_shutdown.assert_called_once_with(client)
+        terminal.assert_called_once_with(CliOptions(), Path("achievement-bridge.exe"), "menu")
 
     def test_closing_web_mode_reopens_the_interface_selector(self) -> None:
         client = MagicMock()
@@ -286,6 +307,7 @@ Provider candidates:
         client = MagicMock()
         with (
             patch.object(cli, "api_client", return_value=client),
+            patch.object(cli, "ensure_api_mode") as ensure_mode,
             patch.object(cli, "print_status"),
             patch.object(cli, "other_bridge_process_exists", return_value=False),
             patch.object(cli.console, "print"),
@@ -294,15 +316,13 @@ Provider candidates:
             result = cli.interactive_menu(CliOptions(), Path("achievement-bridge.exe"))
 
         self.assertEqual(0, result)
+        ensure_mode.assert_called_once_with(client, web_ui=False)
         self.assertNotIn("default", ask.call_args.kwargs)
 
     def test_monitor_uses_api_instead_of_second_zig_process(self) -> None:
         client = MagicMock()
         client.base_url = "http://127.0.0.1:47650"
-        client.request.side_effect = [
-            {"core": {"monitoring": False}},
-            {"monitoring": True},
-        ]
+        client.request.return_value = {"monitoring": True}
         client.stream_monitor_events.return_value = iter(())
         options = cli.MonitorOptions(
             bridge=None,
@@ -320,14 +340,19 @@ Provider candidates:
         with (
             patch.object(cli, "other_bridge_process_exists", return_value=False),
             patch.object(cli, "api_client", return_value=client),
+            patch.object(
+                cli,
+                "ensure_api_mode",
+                return_value={"core": {"monitoring": False}},
+            ) as ensure_mode,
             patch.object(cli, "ensure_steam_host", return_value=setup),
             patch.object(cli.subprocess, "Popen") as popen,
         ):
             result = cli.start_monitor(options, Path("achievement-bridge.exe"))
 
+        ensure_mode.assert_called_once_with(client, web_ui=False)
+
         self.assertEqual(0, result)
-        client.ensure_started.assert_called_once_with()
-        client.request.assert_any_call("GET", "/v1/health", timeout=2)
         client.request.assert_any_call(
             "POST",
             "/v1/monitor/start",

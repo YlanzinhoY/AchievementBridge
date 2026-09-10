@@ -294,13 +294,15 @@ def find_web_root() -> Path:
     )
 
 
-def api_client(bridge: Path, steam_root: str | None) -> BridgeApiClient:
-    try:
-        web_root: Path | None = find_web_root()
-    except FileNotFoundError:
-        # The terminal remains usable in a source checkout before the frontend
-        # is built. Choosing Web reports the actionable build instruction.
-        web_root = None
+def api_client(
+    bridge: Path,
+    steam_root: str | None,
+    *,
+    web_ui: bool = False,
+) -> BridgeApiClient:
+    # Terminal commands still use the typed Go control plane, but they must not
+    # publish the compiled frontend. Only Web mode receives a web root.
+    web_root = find_web_root() if web_ui else None
     key = (bridge, steam_root, web_root)
     with _api_clients_lock:
         client = _api_clients.get(key)
@@ -1067,11 +1069,15 @@ def launch_web_tray(args: CliOptions, bridge: Path) -> subprocess.Popen[bytes]:
     )
 
 
-def launch_terminal(args: CliOptions, bridge: Path) -> subprocess.Popen[bytes]:
+def launch_terminal(
+    args: CliOptions,
+    bridge: Path,
+    command: str | None = None,
+) -> subprocess.Popen[bytes]:
     """Open the interface selector in a new visible console."""
     creation_flags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
     return subprocess.Popen(
-        cli_process_arguments(args, bridge),
+        cli_process_arguments(args, bridge, command),
         cwd=application_root(),
         close_fds=True,
         creationflags=creation_flags,
@@ -1088,36 +1094,50 @@ def wait_for_api_shutdown(client: BridgeApiClient) -> None:
         time.sleep(0.1)
 
 
+def ensure_api_mode(
+    client: BridgeApiClient,
+    *,
+    web_ui: bool,
+) -> dict[str, object]:
+    """Start the Go gateway with exactly the presentation layer requested."""
+    client.ensure_started()
+    health = client.request("GET", "/v1/health", timeout=3)
+    if bool(health.get("web_ui", False)) == web_ui:
+        return health
+
+    client.shutdown()
+    wait_for_api_shutdown(client)
+    client.ensure_started()
+    health = client.request("GET", "/v1/health", timeout=3)
+    if bool(health.get("web_ui", False)) != web_ui:
+        mode = "com" if web_ui else "sem"
+        raise RuntimeError(f"a API local não iniciou {mode} a interface Web")
+    return health
+
+
 def run_tray_host(args: CliOptions, bridge: Path) -> int:
     """Own Web mode independently from every visible CLI window."""
     instance = TrayInstance()
     if not instance.acquire():
         return 0
 
-    client = api_client(bridge, args.steam_root)
+    client = api_client(bridge, args.steam_root, web_ui=True)
     address = f"{client.base_url}/"
-    terminal_lock = threading.Lock()
-    terminal: subprocess.Popen[bytes] | None = None
-
-    def open_terminal_once() -> None:
-        nonlocal terminal
-        with terminal_lock:
-            if terminal is not None and terminal.poll() is None:
-                return
-            terminal = launch_terminal(args, bridge)
 
     try:
         action = run_web_tray(
             address,
             lambda: webbrowser.open_new_tab(address),
-            open_terminal_once,
         )
     finally:
         instance.release()
 
     client.shutdown()
-    if action is TrayAction.CLOSE_WEB:
+    if action in (TrayAction.OPEN_TERMINAL, TrayAction.CLOSE_WEB):
         wait_for_api_shutdown(client)
+    if action is TrayAction.OPEN_TERMINAL:
+        launch_terminal(args, bridge, "menu")
+    elif action is TrayAction.CLOSE_WEB:
         launch_terminal(args, bridge)
     return 0
 
@@ -1127,14 +1147,8 @@ def open_web_interface(args: CliOptions, bridge: Path) -> int:
     # Keep this explicit rather than relying on the API fallback so the Web
     # selection reports a useful error when a source checkout has no build yet.
     find_web_root()
-    client = api_client(bridge, args.steam_root)
-    client.ensure_started()
-    health = client.request("GET", "/v1/health", timeout=3)
-    if not bool(health.get("web_ui", False)):
-        raise RuntimeError(
-            "a instância ativa do Bridge foi iniciada sem a interface Web; "
-            "desative o Bridge e abra-o novamente"
-        )
+    client = api_client(bridge, args.steam_root, web_ui=True)
+    ensure_api_mode(client, web_ui=True)
     address = f"{client.base_url}/"
     open_web = lambda: webbrowser.open_new_tab(address)
     opened = open_web()
@@ -1175,7 +1189,8 @@ def choose_interface(args: CliOptions, bridge: Path) -> int:
 
 
 def interactive_menu(args: CliOptions, bridge: Path) -> int:
-    api_client(bridge, args.steam_root).ensure_started()
+    client = api_client(bridge, args.steam_root)
+    ensure_api_mode(client, web_ui=False)
     while True:
         clear_screen()
         print_status(bridge)
@@ -1235,8 +1250,7 @@ def start_monitor(args: MonitorOptions, bridge: Path) -> int:
     # The gateway owns the only persistent Zig core and streams its events back
     # to this interface, avoiding a second watch-all process.
     client = api_client(bridge, args.steam_root)
-    client.ensure_started()
-    health = client.request("GET", "/v1/health", timeout=2)
+    health = ensure_api_mode(client, web_ui=False)
     already_monitoring = bool(health.get("core", {}).get("monitoring", False))
     if not already_monitoring and other_bridge_process_exists() and not args.allow_duplicate:
         print("Já existe outro Achievement Bridge rodando (provavelmente iniciado pelo LuaTools).")

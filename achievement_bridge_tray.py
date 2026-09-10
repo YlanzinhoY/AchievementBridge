@@ -12,6 +12,7 @@ from pystray import Icon, Menu, MenuItem
 
 
 class TrayAction(Enum):
+    OPEN_TERMINAL = "open_terminal"
     CLOSE_WEB = "close_web"
     EXIT_BRIDGE = "exit_bridge"
 
@@ -83,7 +84,6 @@ def _tray_image() -> Image.Image:
 def run_web_tray(
     address: str,
     open_web: Callable[[], object],
-    open_terminal: Callable[[], object],
 ) -> TrayAction:
     """Block in the detached tray host until the user chooses an exit path."""
     selected = TrayAction.CLOSE_WEB
@@ -91,9 +91,6 @@ def run_web_tray(
 
     def open_panel(_icon: Icon, _item: MenuItem) -> None:
         open_web()
-
-    def open_console(_icon: Icon, _item: MenuItem) -> None:
-        open_terminal()
 
     def select(action: TrayAction) -> Callable[[Icon, MenuItem], None]:
         def callback(active_icon: Icon, _item: MenuItem) -> None:
@@ -104,7 +101,7 @@ def run_web_tray(
         return callback
 
     menu = Menu(
-        MenuItem("Abrir terminal", open_console, default=True),
+        MenuItem("Abrir terminal", select(TrayAction.OPEN_TERMINAL), default=True),
         MenuItem("Abrir painel Web", open_panel),
         Menu.SEPARATOR,
         MenuItem("Fechar Web/API e escolher interface", select(TrayAction.CLOSE_WEB)),

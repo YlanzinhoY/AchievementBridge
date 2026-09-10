@@ -11,6 +11,7 @@ class TrayTests(unittest.TestCase):
         self.assertEqual("RGBA", image.mode)
 
     def test_tray_actions_are_distinct_lifecycle_choices(self) -> None:
+        self.assertNotEqual(TrayAction.OPEN_TERMINAL, TrayAction.CLOSE_WEB)
         self.assertNotEqual(TrayAction.CLOSE_WEB, TrayAction.EXIT_BRIDGE)
 
     def test_only_one_tray_instance_can_own_the_windows_icon(self) -> None:
