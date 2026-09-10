@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string] $Version = '0.1.13',
+    [string] $Version = '0.2.0',
     [switch] $SkipZigBuild,
     [switch] $SkipGoBuild,
     [switch] $CleanReleases
@@ -107,6 +107,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Icon generation failed.' }
     --console `
     --name 'AchievementBridge-CLI' `
     --icon $icon `
+    --collect-submodules 'pystray' `
     --distpath $pyInstallerDist.FullName `
     --workpath (Join-Path $buildRoot 'pyinstaller-work') `
     --specpath $buildRoot `

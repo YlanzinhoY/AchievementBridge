@@ -22,6 +22,7 @@ from typing import Annotated, Callable, Iterable, TextIO, TypeVar
 
 import typer
 import velopack
+from achievement_bridge_tray import TrayAction, run_web_tray
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -1036,8 +1037,8 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
                 achievement_notice = (message, "[bold green]Simulação concluída[/]", "green")
 
 
-def open_web_interface(args: CliOptions, bridge: Path) -> int:
-    """Start the local control plane and hand the user to the compiled Web UI."""
+def open_web_interface(args: CliOptions, bridge: Path) -> TrayAction:
+    """Start the local control plane and keep its lifecycle available in the tray."""
     # Keep this explicit rather than relying on the API fallback so the Web
     # selection reports a useful error when a source checkout has no build yet.
     find_web_root()
@@ -1050,39 +1051,57 @@ def open_web_interface(args: CliOptions, bridge: Path) -> int:
             "desative o Bridge e abra-o novamente"
         )
     address = f"{client.base_url}/"
-    opened = webbrowser.open_new_tab(address)
+    open_web = lambda: webbrowser.open_new_tab(address)
+    opened = open_web()
     message = f"Interface Web disponível em [link={address}]{address}[/link]"
     if not opened:
         message += "\nAbra o endereço acima no seu navegador."
+    message += "\nO Bridge continuará disponível no ícone da bandeja do Windows."
     console.print(Panel(message, title="[bold green]Modo Web[/]", border_style="green"))
-    return 0
+    action = run_web_tray(address, open_web)
+    client.shutdown()
+    if action is TrayAction.CLOSE_WEB:
+        # The shutdown response is sent before Go finishes closing its listener.
+        # Wait briefly so choosing either UI again starts a fresh gateway rather
+        # than racing the previous process on the same loopback port.
+        for _ in range(50):
+            try:
+                client._request_once("GET", "/v1/health", timeout=0.2)
+            except (ConnectionError, RuntimeError):
+                break
+            time.sleep(0.1)
+    return action
 
 
 def choose_interface(args: CliOptions, bridge: Path) -> int:
     """Let people choose the presentation layer before opening any UI."""
-    clear_screen()
-    print_banner()
-    choices = Table.grid(padding=(0, 2))
-    choices.add_column(style="bold bright_cyan", justify="right")
-    choices.add_column()
-    choices.add_row("1", "Terminal — menu e logs no console")
-    choices.add_row("2", "Web — painel visual no navegador")
-    choices.add_row("0", "Sair")
-    console.print(Panel(choices, title="[bold]Como você quer usar o Bridge?[/]", border_style="cyan"))
-    try:
-        choice = Prompt.ask(
-            "[bold]Escolha uma interface[/]",
-            choices=("1", "2", "0"),
-            show_choices=False,
-            show_default=False,
-        )
-    except (EOFError, KeyboardInterrupt):
+    while True:
+        clear_screen()
+        print_banner()
+        choices = Table.grid(padding=(0, 2))
+        choices.add_column(style="bold bright_cyan", justify="right")
+        choices.add_column()
+        choices.add_row("1", "Terminal — menu e logs no console")
+        choices.add_row("2", "Web — painel visual no navegador e controle na bandeja")
+        choices.add_row("0", "Sair")
+        console.print(Panel(choices, title="[bold]Como você quer usar o Bridge?[/]", border_style="cyan"))
+        try:
+            choice = Prompt.ask(
+                "[bold]Escolha uma interface[/]",
+                choices=("1", "2", "0"),
+                show_choices=False,
+                show_default=False,
+            )
+        except (EOFError, KeyboardInterrupt):
+            return 0
+        if choice == "1":
+            return interactive_menu(args, bridge)
+        if choice == "2":
+            action = open_web_interface(args, bridge)
+            if action is TrayAction.CLOSE_WEB:
+                continue
+            return 0
         return 0
-    if choice == "1":
-        return interactive_menu(args, bridge)
-    if choice == "2":
-        return open_web_interface(args, bridge)
-    return 0
 
 
 def interactive_menu(args: CliOptions, bridge: Path) -> int:

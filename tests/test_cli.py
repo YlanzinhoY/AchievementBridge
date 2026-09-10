@@ -65,31 +65,59 @@ class CliParsingTests(unittest.TestCase):
     def test_web_interface_starts_the_local_api_and_opens_its_root(self) -> None:
         client = MagicMock()
         client.base_url = "http://127.0.0.1:47650"
+        client._request_once.side_effect = ConnectionError
         with (
             patch.object(cli, "find_web_root", return_value=Path("frontend/dist")),
             patch.object(cli, "api_client", return_value=client),
             patch.object(cli.webbrowser, "open_new_tab", return_value=True) as open_browser,
+            patch.object(cli, "run_web_tray", return_value=cli.TrayAction.CLOSE_WEB) as tray,
             patch.object(cli.console, "print"),
         ):
             result = cli.open_web_interface(CliOptions(), Path("achievement-bridge.exe"))
 
-        self.assertEqual(0, result)
+        self.assertIs(cli.TrayAction.CLOSE_WEB, result)
         client.ensure_started.assert_called_once_with()
         client.request.assert_called_once_with("GET", "/v1/health", timeout=3)
         open_browser.assert_called_once_with("http://127.0.0.1:47650/")
+        tray.assert_called_once()
+        client.shutdown.assert_called_once_with()
 
     def test_interface_choice_opens_web_without_entering_terminal_menu(self) -> None:
         with (
             patch.object(cli, "clear_screen"),
             patch.object(cli, "print_banner"),
             patch.object(cli.console, "print"),
-            patch.object(cli.Prompt, "ask", return_value="2"),
-            patch.object(cli, "open_web_interface", return_value=0) as open_web,
+            patch.object(cli.Prompt, "ask", side_effect=("2", "0")),
+            patch.object(
+                cli,
+                "open_web_interface",
+                return_value=cli.TrayAction.CLOSE_WEB,
+            ) as open_web,
             patch.object(cli, "interactive_menu") as terminal,
         ):
             result = cli.choose_interface(CliOptions(), Path("achievement-bridge.exe"))
 
         self.assertEqual(0, result)
+        open_web.assert_called_once_with(CliOptions(), Path("achievement-bridge.exe"))
+        terminal.assert_not_called()
+
+    def test_interface_choice_exits_when_tray_closes_the_bridge(self) -> None:
+        with (
+            patch.object(cli, "clear_screen"),
+            patch.object(cli, "print_banner"),
+            patch.object(cli.console, "print"),
+            patch.object(cli.Prompt, "ask", return_value="2") as ask,
+            patch.object(
+                cli,
+                "open_web_interface",
+                return_value=cli.TrayAction.EXIT_BRIDGE,
+            ) as open_web,
+            patch.object(cli, "interactive_menu") as terminal,
+        ):
+            result = cli.choose_interface(CliOptions(), Path("achievement-bridge.exe"))
+
+        self.assertEqual(0, result)
+        ask.assert_called_once()
         open_web.assert_called_once_with(CliOptions(), Path("achievement-bridge.exe"))
         terminal.assert_not_called()
 
