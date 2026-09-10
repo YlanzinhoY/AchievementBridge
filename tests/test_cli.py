@@ -142,7 +142,7 @@ class CliParsingTests(unittest.TestCase):
         instance.release.assert_called_once_with()
         terminal.assert_not_called()
 
-    def test_clicking_the_tray_switches_to_terminal_mode(self) -> None:
+    def test_clicking_the_tray_stops_web_and_opens_interface_selector(self) -> None:
         client = MagicMock()
         client.base_url = "http://127.0.0.1:47650"
         instance = MagicMock()
@@ -160,7 +160,7 @@ class CliParsingTests(unittest.TestCase):
         self.assertEqual(0, result)
         client.shutdown.assert_called_once_with()
         wait_for_shutdown.assert_called_once_with(client)
-        terminal.assert_called_once_with(CliOptions(), Path("achievement-bridge.exe"), "menu")
+        terminal.assert_called_once_with(CliOptions(), Path("achievement-bridge.exe"))
 
     def test_closing_web_mode_reopens_the_interface_selector(self) -> None:
         client = MagicMock()

@@ -1136,7 +1136,7 @@ def run_tray_host(args: CliOptions, bridge: Path) -> int:
     if action in (TrayAction.OPEN_TERMINAL, TrayAction.CLOSE_WEB):
         wait_for_api_shutdown(client)
     if action is TrayAction.OPEN_TERMINAL:
-        launch_terminal(args, bridge, "menu")
+        launch_terminal(args, bridge)
     elif action is TrayAction.CLOSE_WEB:
         launch_terminal(args, bridge)
     return 0

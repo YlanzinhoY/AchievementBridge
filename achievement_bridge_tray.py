@@ -101,7 +101,7 @@ def run_web_tray(
         return callback
 
     menu = Menu(
-        MenuItem("Abrir terminal", select(TrayAction.OPEN_TERMINAL), default=True),
+        MenuItem("Abrir seletor de interface", select(TrayAction.OPEN_TERMINAL), default=True),
         MenuItem("Abrir painel Web", open_panel),
         Menu.SEPARATOR,
         MenuItem("Fechar Web/API e escolher interface", select(TrayAction.CLOSE_WEB)),
