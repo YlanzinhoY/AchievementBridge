@@ -14,6 +14,7 @@ pub const Context = struct {
     interval_ms: u32,
     recover: bool,
     notifications: bool,
+    stop_requested: ?*const std.atomic.Value(bool) = null,
 };
 
 pub fn run(context: *const Context) !void {
@@ -33,7 +34,7 @@ pub fn run(context: *const Context) !void {
 }
 
 fn watchRockstarWorker(context: *const Context) void {
-    while (true) {
+    while (!shouldStop(context)) {
         bridge.providers.rockstar.watcher.run(std.heap.smp_allocator, context.io, .{
             .roots = context.rockstar_roots,
             .journal_path = context.journal_path,
@@ -41,7 +42,9 @@ fn watchRockstarWorker(context: *const Context) void {
             .recover = context.recover,
             .notifications = context.notifications,
             .steam_root = null,
+            .stop_requested = context.stop_requested,
         }) catch |err| {
+            if (shouldStop(context)) return;
             std.debug.print("[AchievementBridge] provider=rockstar restart_reason={s}\n", .{@errorName(err)});
             std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
         };
@@ -49,8 +52,9 @@ fn watchRockstarWorker(context: *const Context) void {
 }
 
 fn watchSessionWorker(context: *const Context) void {
-    while (true) {
+    while (!shouldStop(context)) {
         runSessionMonitor(context) catch |err| {
+            if (shouldStop(context)) return;
             std.debug.print("[AchievementBridge] provider=sessions restart_reason={s}\n", .{@errorName(err)});
             std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
         };
@@ -65,11 +69,14 @@ fn runSessionMonitor(context: *const Context) !void {
     defer catalog.deinit();
     var monitor = bridge.host.session_monitor.Monitor.init(allocator, context.io, &catalog);
     defer monitor.deinit();
-    try monitor.run(.{ .interval_ms = @max(context.interval_ms, 1000) });
+    try monitor.run(.{
+        .interval_ms = @max(context.interval_ms, 1000),
+        .stop_requested = context.stop_requested,
+    });
 }
 
 fn watchRuneWorker(context: *const Context) void {
-    while (true) {
+    while (!shouldStop(context)) {
         bridge.providers.rune.watcher.run(std.heap.smp_allocator, context.io, .{
             .roots = context.rune_roots,
             .journal_path = context.journal_path,
@@ -77,7 +84,9 @@ fn watchRuneWorker(context: *const Context) void {
             .recover = context.recover,
             .notifications = context.notifications,
             .steam_root = null,
+            .stop_requested = context.stop_requested,
         }) catch |err| {
+            if (shouldStop(context)) return;
             std.debug.print("[AchievementBridge] provider=rune restart_reason={s}\n", .{@errorName(err)});
             std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
         };
@@ -85,7 +94,7 @@ fn watchRuneWorker(context: *const Context) void {
 }
 
 fn watchGseWorker(context: *const Context) void {
-    while (true) {
+    while (!shouldStop(context)) {
         bridge.gse.watcher.run(std.heap.smp_allocator, context.io, .{
             .roots = context.gse_roots,
             .journal_path = context.journal_path,
@@ -93,7 +102,9 @@ fn watchGseWorker(context: *const Context) void {
             .recover = context.recover,
             .notifications = context.notifications,
             .steam_root = null,
+            .stop_requested = context.stop_requested,
         }) catch |err| {
+            if (shouldStop(context)) return;
             std.debug.print("[AchievementBridge] provider=gse restart_reason={s}\n", .{@errorName(err)});
             std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
         };
@@ -101,14 +112,16 @@ fn watchGseWorker(context: *const Context) void {
 }
 
 fn watchUbisoftWorker(context: *const Context) void {
-    while (true) {
+    while (!shouldStop(context)) {
         bridge.providers.ubisoft.watcher.run(std.heap.smp_allocator, context.io, .{
             .spool_root = context.spool_root,
             .journal_path = context.journal_path,
             .interval_ms = context.interval_ms,
             .recover = context.recover,
             .notifications = context.notifications,
+            .stop_requested = context.stop_requested,
         }) catch |err| {
+            if (shouldStop(context)) return;
             std.debug.print("[AchievementBridge] provider=ubisoft restart_reason={s}\n", .{@errorName(err)});
             std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
         };
@@ -116,7 +129,7 @@ fn watchUbisoftWorker(context: *const Context) void {
 }
 
 fn watchR2Worker(context: *const Context) void {
-    while (true) {
+    while (!shouldStop(context)) {
         bridge.providers.uplay_r2.watcher.run(std.heap.smp_allocator, context.io, .{
             .roots = context.r2_roots,
             .journal_path = context.journal_path,
@@ -125,9 +138,15 @@ fn watchR2Worker(context: *const Context) void {
             .interval_ms = context.interval_ms,
             .recover = context.recover,
             .notifications = context.notifications,
+            .stop_requested = context.stop_requested,
         }) catch |err| {
+            if (shouldStop(context)) return;
             std.debug.print("[AchievementBridge] provider=uplay_r2 restart_reason={s}\n", .{@errorName(err)});
             std.Io.sleep(context.io, .fromSeconds(1), .awake) catch {};
         };
     }
+}
+
+fn shouldStop(context: *const Context) bool {
+    return if (context.stop_requested) |flag| flag.load(.acquire) else false;
 }

@@ -28,7 +28,9 @@ type Supervisor struct {
 }
 
 func NewSupervisor(client *Client, executable, address, steamRoot string) *Supervisor {
-	broker := events.NewBroker(500)
+	// Keep the complete current-session history so the web log can be reopened
+	// without dropping earlier lines. A zero history limit means unbounded.
+	broker := events.NewBroker(0)
 	return &Supervisor{
 		client:     client,
 		executable: executable,

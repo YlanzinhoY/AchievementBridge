@@ -16,7 +16,7 @@ pub const RenderedSchema = struct {
     }
 };
 
-/// Converts the catalog format used by ACBFR.json into the flat object expected
+/// Converts a Steam achievement catalog into the flat object expected
 /// by the Uplay R2-compatible loader. `steam_order + 1` is the objective id;
 /// the legacy `id` field is deliberately ignored because scraped catalogs may
 /// populate it with unrelated, repeated values.

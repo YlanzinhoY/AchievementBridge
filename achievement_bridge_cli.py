@@ -14,6 +14,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import Annotated, Callable, Iterable, TextIO, TypeVar
 
 import typer
 import velopack
+from achievement_bridge_tray import TrayAction, TrayInstance, run_web_tray
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -43,7 +45,7 @@ MAX_NOTIFICATION_PREVIEW_MS = 60_000
 DEFAULT_API_URL = "http://127.0.0.1:47650"
 console = Console(highlight=False)
 ResultType = TypeVar("ResultType")
-_api_clients: dict[tuple[Path, str | None], "BridgeApiClient"] = {}
+_api_clients: dict[tuple[Path, str | None, Path | None], "BridgeApiClient"] = {}
 _api_clients_lock = threading.Lock()
 
 
@@ -115,9 +117,10 @@ class SteamHostSetup:
 class BridgeApiClient:
     """Typed UI boundary for the local Go control plane."""
 
-    def __init__(self, bridge: Path, steam_root: str | None) -> None:
+    def __init__(self, bridge: Path, steam_root: str | None, web_root: Path | None = None) -> None:
         self.bridge = bridge
         self.steam_root = steam_root
+        self.web_root = web_root
         self.base_url = os.environ.get("ACHIEVEMENT_BRIDGE_API_URL", DEFAULT_API_URL).rstrip("/")
         self._startup_lock = threading.Lock()
 
@@ -143,7 +146,7 @@ class BridgeApiClient:
                 pass
 
             api = find_api(self.bridge)
-            arguments = api_start_arguments(api, self.bridge, self.steam_root)
+            arguments = api_start_arguments(api, self.bridge, self.steam_root, self.web_root)
             log_path = Path(default_api_log_path())
             log_path.parent.mkdir(parents=True, exist_ok=True)
             creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -254,7 +257,12 @@ def find_api(bridge: Path) -> Path:
     )
 
 
-def api_start_arguments(api: Path, bridge: Path, steam_root: str | None) -> list[str]:
+def api_start_arguments(
+    api: Path,
+    bridge: Path,
+    steam_root: str | None,
+    web_root: Path | None = None,
+) -> list[str]:
     arguments = [
         str(api),
         "--core",
@@ -262,15 +270,44 @@ def api_start_arguments(api: Path, bridge: Path, steam_root: str | None) -> list
     ]
     if steam_root:
         arguments += ["--steam-root", steam_root]
+    if web_root is not None:
+        arguments += ["--web-root", str(web_root)]
     return arguments
 
 
-def api_client(bridge: Path, steam_root: str | None) -> BridgeApiClient:
-    key = (bridge, steam_root)
+def find_web_root() -> Path:
+    """Locate the built web interface in source trees and packaged releases."""
+    root = application_root()
+    candidates = (
+        os.environ.get("ACHIEVEMENT_BRIDGE_WEB_ROOT"),
+        str(root / "web"),
+        str(root / "frontend" / "dist"),
+    )
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if (path / "index.html").is_file():
+            return path.resolve()
+    raise FileNotFoundError(
+        "a interface Web não foi encontrada; execute 'bun run build' dentro de frontend"
+    )
+
+
+def api_client(
+    bridge: Path,
+    steam_root: str | None,
+    *,
+    web_ui: bool = False,
+) -> BridgeApiClient:
+    # Terminal commands still use the typed Go control plane, but they must not
+    # publish the compiled frontend. Only Web mode receives a web root.
+    web_root = find_web_root() if web_ui else None
+    key = (bridge, steam_root, web_root)
     with _api_clients_lock:
         client = _api_clients.get(key)
         if client is None:
-            client = BridgeApiClient(bridge, steam_root)
+            client = BridgeApiClient(bridge, steam_root, web_root)
             _api_clients[key] = client
         return client
 
@@ -1002,8 +1039,158 @@ def simulate_popup(args: CliOptions, bridge: Path) -> None:
                 achievement_notice = (message, "[bold green]Simulação concluída[/]", "green")
 
 
+def cli_process_arguments(args: CliOptions, bridge: Path, command: str | None = None) -> list[str]:
+    """Build a command that works from source and from the packaged executable."""
+    if getattr(sys, "frozen", False):
+        arguments = [sys.executable]
+    else:
+        arguments = [sys.executable, str(Path(__file__).resolve())]
+    arguments += ["--bridge", str(bridge)]
+    if args.steam_root:
+        arguments += ["--steam-root", args.steam_root]
+    if command:
+        arguments.append(command)
+    return arguments
+
+
+def launch_web_tray(args: CliOptions, bridge: Path) -> subprocess.Popen[bytes]:
+    """Detach the tray owner so closing the launcher cannot stop Web mode."""
+    creation_flags = 0
+    if os.name == "nt":
+        creation_flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+    return subprocess.Popen(
+        cli_process_arguments(args, bridge, "tray-host"),
+        cwd=application_root(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=creation_flags,
+    )
+
+
+def launch_terminal(
+    args: CliOptions,
+    bridge: Path,
+    command: str | None = None,
+) -> subprocess.Popen[bytes]:
+    """Open the interface selector in a new visible console."""
+    creation_flags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
+    return subprocess.Popen(
+        cli_process_arguments(args, bridge, command),
+        cwd=application_root(),
+        close_fds=True,
+        creationflags=creation_flags,
+    )
+
+
+def wait_for_api_shutdown(client: BridgeApiClient) -> None:
+    """Avoid racing a new selector against the old Go listener."""
+    for _ in range(50):
+        try:
+            client._request_once("GET", "/v1/health", timeout=0.2)
+        except (ConnectionError, RuntimeError):
+            break
+        time.sleep(0.1)
+
+
+def ensure_api_mode(
+    client: BridgeApiClient,
+    *,
+    web_ui: bool,
+) -> dict[str, object]:
+    """Start the Go gateway with exactly the presentation layer requested."""
+    client.ensure_started()
+    health = client.request("GET", "/v1/health", timeout=3)
+    if bool(health.get("web_ui", False)) == web_ui:
+        return health
+
+    client.shutdown()
+    wait_for_api_shutdown(client)
+    client.ensure_started()
+    health = client.request("GET", "/v1/health", timeout=3)
+    if bool(health.get("web_ui", False)) != web_ui:
+        mode = "com" if web_ui else "sem"
+        raise RuntimeError(f"a API local não iniciou {mode} a interface Web")
+    return health
+
+
+def run_tray_host(args: CliOptions, bridge: Path) -> int:
+    """Own Web mode independently from every visible CLI window."""
+    instance = TrayInstance()
+    if not instance.acquire():
+        return 0
+
+    client = api_client(bridge, args.steam_root, web_ui=True)
+    address = f"{client.base_url}/"
+
+    try:
+        action = run_web_tray(
+            address,
+            lambda: webbrowser.open_new_tab(address),
+        )
+    finally:
+        instance.release()
+
+    client.shutdown()
+    if action in (TrayAction.OPEN_TERMINAL, TrayAction.CLOSE_WEB):
+        wait_for_api_shutdown(client)
+    if action is TrayAction.OPEN_TERMINAL:
+        launch_terminal(args, bridge)
+    elif action is TrayAction.CLOSE_WEB:
+        launch_terminal(args, bridge)
+    return 0
+
+
+def open_web_interface(args: CliOptions, bridge: Path) -> int:
+    """Start Web mode, detach its tray owner and let the visible CLI exit."""
+    # Keep this explicit rather than relying on the API fallback so the Web
+    # selection reports a useful error when a source checkout has no build yet.
+    find_web_root()
+    client = api_client(bridge, args.steam_root, web_ui=True)
+    ensure_api_mode(client, web_ui=True)
+    address = f"{client.base_url}/"
+    open_web = lambda: webbrowser.open_new_tab(address)
+    opened = open_web()
+    message = f"Interface Web disponível em [link={address}]{address}[/link]"
+    if not opened:
+        message += "\nAbra o endereço acima no seu navegador."
+    message += "\nO Bridge continuará disponível no ícone da bandeja do Windows."
+    console.print(Panel(message, title="[bold green]Modo Web[/]", border_style="green"))
+    launch_web_tray(args, bridge)
+    return 0
+
+
+def choose_interface(args: CliOptions, bridge: Path) -> int:
+    """Let people choose the presentation layer before opening any UI."""
+    clear_screen()
+    print_banner()
+    choices = Table.grid(padding=(0, 2))
+    choices.add_column(style="bold bright_cyan", justify="right")
+    choices.add_column()
+    choices.add_row("1", "Terminal — menu e logs no console")
+    choices.add_row("2", "Web — painel visual no navegador e controle na bandeja")
+    choices.add_row("0", "Sair")
+    console.print(Panel(choices, title="[bold]Como você quer usar o Bridge?[/]", border_style="cyan"))
+    try:
+        choice = Prompt.ask(
+            "[bold]Escolha uma interface[/]",
+            choices=("1", "2", "0"),
+            show_choices=False,
+            show_default=False,
+        )
+    except (EOFError, KeyboardInterrupt):
+        return 0
+    if choice == "1":
+        return interactive_menu(args, bridge)
+    if choice == "2":
+        return open_web_interface(args, bridge)
+    return 0
+
+
 def interactive_menu(args: CliOptions, bridge: Path) -> int:
-    api_client(bridge, args.steam_root).ensure_started()
+    client = api_client(bridge, args.steam_root)
+    ensure_api_mode(client, web_ui=False)
     while True:
         clear_screen()
         print_status(bridge)
@@ -1063,8 +1250,7 @@ def start_monitor(args: MonitorOptions, bridge: Path) -> int:
     # The gateway owns the only persistent Zig core and streams its events back
     # to this interface, avoiding a second watch-all process.
     client = api_client(bridge, args.steam_root)
-    client.ensure_started()
-    health = client.request("GET", "/v1/health", timeout=2)
+    health = ensure_api_mode(client, web_ui=False)
     already_monitoring = bool(health.get("core", {}).get("monitoring", False))
     if not already_monitoring and other_bridge_process_exists() and not args.allow_duplicate:
         print("Já existe outro Achievement Bridge rodando (provavelmente iniciado pelo LuaTools).")
@@ -1173,7 +1359,7 @@ def application(
     options = CliOptions(bridge=bridge, steam_root=steam_root)
     context.obj = options
     if context.invoked_subcommand is None:
-        result = exit_on_failure(lambda: interactive_menu(options, resolve_bridge(bridge)))
+        result = exit_on_failure(lambda: choose_interface(options, resolve_bridge(bridge)))
         if result:
             raise typer.Exit(result)
 
@@ -1183,6 +1369,15 @@ def menu_command(context: typer.Context) -> None:
     """Abra o menu interativo e escolha quando ativar o Bridge."""
     options = get_cli_options(context)
     result = exit_on_failure(lambda: interactive_menu(options, resolve_bridge(options.bridge)))
+    if result:
+        raise typer.Exit(result)
+
+
+@app.command("tray-host", hidden=True)
+def tray_host_command(context: typer.Context) -> None:
+    """Run the detached Windows tray owner for Web mode."""
+    options = get_cli_options(context)
+    result = exit_on_failure(lambda: run_tray_host(options, resolve_bridge(options.bridge)))
     if result:
         raise typer.Exit(result)
 

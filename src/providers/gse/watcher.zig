@@ -18,6 +18,7 @@ pub const Options = struct {
     schema_paths: []const []const u8 = &.{},
     language: []const u8 = "brazilian",
     steam_root: ?[]const u8 = null,
+    stop_requested: ?*const std.atomic.Value(bool) = null,
 };
 
 const TrackedGame = struct {
@@ -82,11 +83,15 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     const watch_started_at_ns: i96 = @intCast(std.Io.Clock.real.now(io).nanoseconds);
 
     std.debug.print("[AchievementBridge] provider=gse status=discovering\n", .{});
-    while (true) {
+    while (!shouldStop(options.stop_requested)) {
         try discoverNewGames(allocator, io, options, watch_started_at_ns, &journal, &tracked, &notifier, &metadata, &steam_metadata_attempted);
         for (tracked.items) |*game| try checkGame(allocator, io, &journal, game, &notifier, &metadata);
         try std.Io.sleep(io, .fromMilliseconds(options.interval_ms), .awake);
     }
+}
+
+fn shouldStop(stop_requested: ?*const std.atomic.Value(bool)) bool {
+    return if (stop_requested) |flag| flag.load(.acquire) else false;
 }
 
 fn discoverNewGames(

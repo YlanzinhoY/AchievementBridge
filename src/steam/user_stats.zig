@@ -33,6 +33,28 @@ pub const AchievementList = struct {
     }
 };
 
+/// Steam's display attributes expose achievement artwork as a per-app filename,
+/// not as something an HTTP client can render directly. The control-plane
+/// contract uses absolute HTTPS URLs so every UI receives usable artwork.
+pub fn resolveAchievementImageUrls(list: *AchievementList, app_id: u32) !void {
+    if (app_id == 0) return error.InvalidSteamAppId;
+    for (list.items.items) |*achievement| {
+        try resolveAchievementImageUrl(list.allocator, app_id, &achievement.icon);
+        try resolveAchievementImageUrl(list.allocator, app_id, &achievement.icon_gray);
+    }
+}
+
+fn resolveAchievementImageUrl(allocator: std.mem.Allocator, app_id: u32, image: *[]u8) !void {
+    if (image.len == 0 or std.mem.startsWith(u8, image.*, "https://") or std.mem.startsWith(u8, image.*, "http://")) return;
+    const resolved = try std.fmt.allocPrint(
+        allocator,
+        "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/{d}/{s}",
+        .{ app_id, image.* },
+    );
+    allocator.free(image.*);
+    image.* = resolved;
+}
+
 pub const UserStats = struct {
     pointer: *anyopaque,
 
@@ -197,4 +219,31 @@ test "Steam achievement methods use ISteamUserStats013 slots 6, 7, 9, and 12" {
     try std.testing.expect(Fake.clear_called);
     try std.testing.expect(Fake.store_called);
     try std.testing.expect(Fake.progress_called);
+}
+
+test "achievement artwork paths become Steam CDN URLs" {
+    const allocator = std.testing.allocator;
+    var list = AchievementList{ .allocator = allocator };
+    defer list.deinit();
+    try list.items.append(allocator, .{
+        .api_name = try allocator.dupe(u8, "ACH_TEST"),
+        .name = try allocator.dupe(u8, "Test"),
+        .description = try allocator.dupe(u8, "Description"),
+        .icon = try allocator.dupe(u8, "color.jpg"),
+        .icon_gray = try allocator.dupe(u8, "gray.jpg"),
+        .unlocked = false,
+        .unlock_time = 0,
+        .hidden = false,
+        .global_percent = null,
+    });
+
+    try resolveAchievementImageUrls(&list, 3751950);
+    try std.testing.expectEqualStrings(
+        "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/3751950/color.jpg",
+        list.items.items[0].icon,
+    );
+    try std.testing.expectEqualStrings(
+        "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/3751950/gray.jpg",
+        list.items.items[0].icon_gray,
+    );
 }

@@ -63,7 +63,19 @@ const State = struct {
     steam_root: ?[]u8,
     preview_transaction_path: []u8,
     monitor: MonitorDefaults,
-    monitor_started: bool = false,
+    monitor_started: std.atomic.Value(bool) = .init(false),
+    monitor_stopping: std.atomic.Value(bool) = .init(false),
+    monitor_stop_requested: std.atomic.Value(bool) = .init(false),
+
+    const MonitorRuntime = struct {
+        context: bridge.host.all_watchers.Context,
+        owned_journal_path: ?[]u8 = null,
+
+        fn deinit(self: *MonitorRuntime, allocator: std.mem.Allocator) void {
+            if (self.owned_journal_path) |path| allocator.free(path);
+            self.* = undefined;
+        }
+    };
 
     fn init(
         allocator: std.mem.Allocator,
@@ -120,29 +132,47 @@ const State = struct {
     }
 
     fn startMonitor(self: *State, params: Params) !void {
-        if (self.monitor_started) return;
+        if (self.monitor_started.load(.acquire)) {
+            if (self.monitor_stopping.load(.acquire)) return error.MonitorStopping;
+            return;
+        }
         if (params.interval_ms < 100) return error.IntervalTooSmall;
-        const context = try self.allocator.create(bridge.host.all_watchers.Context);
-        context.* = .{
-            .io = self.io,
-            .gse_roots = self.monitor.gse_roots,
-            .r2_roots = self.monitor.r2_roots,
-            .rune_roots = self.monitor.rune_roots,
-            .rockstar_roots = self.monitor.rockstar_roots,
-            .spool_root = self.monitor.spool_root,
-            .journal_path = if (params.journal_path) |path|
-                try self.allocator.dupe(u8, path)
-            else
-                self.monitor.journal_path,
-            .replay_guard_path = self.monitor.replay_guard_path,
-            .support_root = self.monitor.support_root,
-            .interval_ms = params.interval_ms,
-            .recover = params.recover,
-            .notifications = params.notifications,
+        const runtime = try self.allocator.create(MonitorRuntime);
+        errdefer self.allocator.destroy(runtime);
+        const owned_journal_path = if (params.journal_path) |path|
+            try self.allocator.dupe(u8, path)
+        else
+            null;
+        errdefer if (owned_journal_path) |path| self.allocator.free(path);
+        self.monitor_stop_requested.store(false, .release);
+        self.monitor_stopping.store(false, .release);
+        runtime.* = .{
+            .context = .{
+                .io = self.io,
+                .gse_roots = self.monitor.gse_roots,
+                .r2_roots = self.monitor.r2_roots,
+                .rune_roots = self.monitor.rune_roots,
+                .rockstar_roots = self.monitor.rockstar_roots,
+                .spool_root = self.monitor.spool_root,
+                .journal_path = owned_journal_path orelse self.monitor.journal_path,
+                .replay_guard_path = self.monitor.replay_guard_path,
+                .support_root = self.monitor.support_root,
+                .interval_ms = params.interval_ms,
+                .recover = params.recover,
+                .notifications = params.notifications,
+                .stop_requested = &self.monitor_stop_requested,
+            },
+            .owned_journal_path = owned_journal_path,
         };
-        const thread = try std.Thread.spawn(.{}, monitorWorker, .{context});
+        const thread = try std.Thread.spawn(.{}, monitorWorker, .{ self, runtime });
         thread.detach();
-        self.monitor_started = true;
+        self.monitor_started.store(true, .release);
+    }
+
+    fn stopMonitor(self: *State) void {
+        if (!self.monitor_started.load(.acquire)) return;
+        self.monitor_stopping.store(true, .release);
+        self.monitor_stop_requested.store(true, .release);
     }
 };
 
@@ -213,15 +243,24 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
             .status = "ready",
             .protocol_version = protocol_version,
             .steam_session_scope = "request",
-            .monitoring = state.monitor_started,
+            .monitoring = state.monitor_started.load(.acquire) and !state.monitor_stopping.load(.acquire),
+            .stopping = state.monitor_stopping.load(.acquire),
         });
         return;
     }
     if (std.mem.eql(u8, request.method, "start_monitor")) {
         try state.startMonitor(request.params);
         try writeSuccess(allocator, writer, request.id, .{
-            .monitoring = state.monitor_started,
+            .monitoring = state.monitor_started.load(.acquire) and !state.monitor_stopping.load(.acquire),
             .interval_ms = request.params.interval_ms,
+        });
+        return;
+    }
+    if (std.mem.eql(u8, request.method, "stop_monitor")) {
+        state.stopMonitor();
+        try writeSuccess(allocator, writer, request.id, .{
+            .monitoring = false,
+            .stopping = state.monitor_stopping.load(.acquire),
         });
         return;
     }
@@ -232,6 +271,7 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         try session.client.loadCurrentUserStats(state.io, app_id, 10_000);
         var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
         defer achievements.deinit();
+        try bridge.steam.user_stats.resolveAchievementImageUrls(&achievements, app_id);
         try writeSuccess(allocator, writer, request.id, .{
             .app_id = app_id,
             .achievements = achievements.items.items,
@@ -814,8 +854,15 @@ fn writeAtomic(io: std.Io, path: []const u8, bytes: []const u8) !void {
     try atomic.replace(io);
 }
 
-fn monitorWorker(context: *const bridge.host.all_watchers.Context) void {
-    bridge.host.all_watchers.run(context) catch |err|
+fn monitorWorker(state: *State, runtime: *State.MonitorRuntime) void {
+    defer {
+        runtime.deinit(state.allocator);
+        state.allocator.destroy(runtime);
+        state.monitor_started.store(false, .release);
+        state.monitor_stopping.store(false, .release);
+        state.monitor_stop_requested.store(false, .release);
+    }
+    bridge.host.all_watchers.run(&runtime.context) catch |err|
         std.debug.print("[AchievementBridge] monitor_stopped=true error={s}\n", .{@errorName(err)});
 }
 

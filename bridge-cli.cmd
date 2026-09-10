@@ -3,7 +3,7 @@ setlocal
 
 set "VENV_PY=%~dp0.venv\Scripts\python.exe"
 if exist "%VENV_PY%" (
-  "%VENV_PY%" -c "import typer, rich, velopack" >nul 2>nul
+  "%VENV_PY%" -c "import typer, rich, velopack, pystray, PIL" >nul 2>nul
   if not errorlevel 1 goto run
 )
 

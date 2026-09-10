@@ -8,6 +8,7 @@ const core_session = @import("../core/session.zig");
 pub const Options = struct {
     interval_ms: u32 = 1000,
     once: bool = false,
+    stop_requested: ?*const std.atomic.Value(bool) = null,
 };
 
 const HostedSession = struct {
@@ -48,7 +49,7 @@ pub const Monitor = struct {
     }
 
     pub fn run(self: *Monitor, options: Options) !void {
-        while (true) {
+        while (!shouldStop(options.stop_requested)) {
             try self.poll();
             if (options.once) return;
             try std.Io.sleep(self.io, .fromMilliseconds(options.interval_ms), .awake);
@@ -111,6 +112,10 @@ pub const Monitor = struct {
         std.debug.print("[AchievementBridge] active_game_sessions={d}\n", .{self.active.count()});
     }
 };
+
+fn shouldStop(stop_requested: ?*const std.atomic.Value(bool)) bool {
+    return if (stop_requested) |flag| flag.load(.acquire) else false;
+}
 
 fn createHosted(
     allocator: std.mem.Allocator,

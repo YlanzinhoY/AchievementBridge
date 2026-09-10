@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string] $Version = '0.1.13',
+    [string] $Version = '0.2.2',
     [switch] $SkipZigBuild,
     [switch] $SkipGoBuild,
     [switch] $CleanReleases
@@ -72,6 +72,26 @@ foreach ($artifact in @($core, $cloud, $gateway)) {
     if (-not (Test-Path -LiteralPath $artifact)) { throw "Missing build artifact: $artifact" }
 }
 
+# The public Web UI is a compiled static bundle served by the local Go API.
+# Bun is required only while producing a release, never on the user's machine.
+$bun = Get-Command bun -ErrorAction SilentlyContinue
+if ($null -eq $bun) {
+    throw 'bun.exe was not found. Install Bun to build the packaged Web interface.'
+}
+Push-Location (Join-Path $repoRoot 'frontend')
+try {
+    & $bun.Source install --frozen-lockfile
+    if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency install failed.' }
+    & $bun.Source run build
+    if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' }
+} finally {
+    Pop-Location
+}
+$webDist = Join-Path $repoRoot 'frontend\dist'
+if (-not (Test-Path -LiteralPath (Join-Path $webDist 'index.html'))) {
+    throw "Missing compiled Web UI: $webDist"
+}
+
 if (Test-Path -LiteralPath $buildRoot) {
     Remove-Item -LiteralPath $buildRoot -Recurse -Force
 }
@@ -87,6 +107,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Icon generation failed.' }
     --console `
     --name 'AchievementBridge-CLI' `
     --icon $icon `
+    --collect-submodules 'pystray' `
     --distpath $pyInstallerDist.FullName `
     --workpath (Join-Path $buildRoot 'pyinstaller-work') `
     --specpath $buildRoot `
@@ -97,6 +118,7 @@ $stage = Join-Path $pyInstallerDist.FullName 'AchievementBridge-CLI'
 Copy-Item -LiteralPath $core -Destination $stage
 Copy-Item -LiteralPath $cloud -Destination $stage
 Copy-Item -LiteralPath $gateway -Destination $stage
+Copy-Item -LiteralPath $webDist -Destination (Join-Path $stage 'web') -Recurse
 Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $repoRoot 'REFERENCES.md') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination $stage

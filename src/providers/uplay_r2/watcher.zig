@@ -20,6 +20,7 @@ pub const Options = struct {
     steam_root: ?[]const u8 = null,
     replay_guard_path: ?[]const u8 = null,
     support_root: ?[]const u8 = null,
+    stop_requested: ?*const std.atomic.Value(bool) = null,
 };
 
 const Tracked = struct {
@@ -70,7 +71,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         };
     };
     std.debug.print("[UplayR2Provider] status=discovering\n", .{});
-    while (true) {
+    while (!shouldStop(options.stop_requested)) {
         var candidates = try discovery.discover(allocator, io, options.roots);
         defer candidates.deinit();
         for (candidates.items.items) |candidate| {
@@ -108,6 +109,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         }
         try std.Io.sleep(io, .fromMilliseconds(options.interval_ms), .awake);
     }
+}
+
+fn shouldStop(stop_requested: ?*const std.atomic.Value(bool)) bool {
+    return if (stop_requested) |flag| flag.load(.acquire) else false;
 }
 
 fn emitNew(allocator: std.mem.Allocator, io: std.Io, journal: *Journal, notifier: *?WindowsNotifier, guard: *?replay_guard.Guard, product_id: u32, state_path: []const u8, before: *const snapshot.Snapshot, after: *snapshot.Snapshot, recovered: bool, configured_steam_app_id: ?u32, support_root: ?[]const u8, metadata: *const MetadataCatalog) !void {

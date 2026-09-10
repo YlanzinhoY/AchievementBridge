@@ -10,8 +10,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -36,6 +38,7 @@ type application struct {
 	supervisor coreSupervisor
 	eventSync  *eventSyncer
 	shutdown   func()
+	webUI      bool
 
 	recoveryMu    sync.Mutex
 	monitorMu     sync.RWMutex
@@ -91,6 +94,7 @@ func main() {
 	coreAddress := flag.String("core-address", envOr("ACHIEVEMENT_BRIDGE_CORE_ADDRESS", defaultCoreAddress), "loopback Zig core address")
 	coreExecutable := flag.String("core", os.Getenv("ACHIEVEMENT_BRIDGE_PATH"), "path to achievement-bridge executable")
 	steamRoot := flag.String("steam-root", os.Getenv("STEAM_ROOT"), "optional Steam installation path")
+	webRoot := flag.String("web-root", os.Getenv("ACHIEVEMENT_BRIDGE_WEB_ROOT"), "optional compiled Web UI directory")
 	parentPID := flag.Int("parent-pid", 0, "optional UI process whose exit stops this API")
 	flag.Parse()
 
@@ -140,8 +144,16 @@ func main() {
 	mux.HandleFunc("POST /v1/achievement-previews/rollback", app.rollbackAchievementPreview)
 	mux.HandleFunc("POST /v1/achievement-syncs", app.syncAchievement)
 	mux.HandleFunc("POST /v1/monitor/start", app.startMonitor)
+	mux.HandleFunc("POST /v1/monitor/stop", app.stopMonitor)
 	mux.HandleFunc("GET /v1/monitor/events", app.monitorEvents)
 	mux.HandleFunc("POST /v1/shutdown", app.shutdownAPI)
+	if handler, err := webUIHandler(*webRoot); err != nil {
+		log.Printf("Web UI disabled: %v", err)
+	} else if handler != nil {
+		mux.Handle("GET /", handler)
+		app.webUI = true
+		log.Printf("Web UI available from %s", *webRoot)
+	}
 
 	server := &http.Server{
 		Addr:              *apiAddress,
@@ -210,6 +222,7 @@ func (a *application) health(writer http.ResponseWriter, request *http.Request) 
 		"service": "achievement-bridge-api",
 		"status":  "ready",
 		"core":    coreHealth,
+		"web_ui":  a.webUI,
 	})
 }
 
@@ -226,7 +239,30 @@ func (a *application) listAchievements(writer http.ResponseWriter, request *http
 		writeCoreError(writer, err)
 		return
 	}
+	normalizeAchievementImages(uint32(appID), &catalog)
 	writeJSON(writer, http.StatusOK, catalog)
+}
+
+func normalizeAchievementImages(appID uint32, catalog *achievementCatalog) {
+	for index := range catalog.Achievements {
+		catalog.Achievements[index].Icon = steamAchievementImageURL(appID, catalog.Achievements[index].Icon)
+		catalog.Achievements[index].IconGray = steamAchievementImageURL(appID, catalog.Achievements[index].IconGray)
+	}
+}
+
+// The Zig core normally returns the absolute CDN URL. Keeping this adapter at
+// the HTTP boundary preserves the public contract for older cores and for
+// Steam clients that still return the original filename display attribute.
+func steamAchievementImageURL(appID uint32, image string) string {
+	image = strings.TrimSpace(image)
+	if image == "" || strings.HasPrefix(image, "https://") || strings.HasPrefix(image, "http://") {
+		return image
+	}
+	return fmt.Sprintf(
+		"https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/%d/%s",
+		appID,
+		url.PathEscape(image),
+	)
 }
 
 func (a *application) previewAchievement(writer http.ResponseWriter, request *http.Request) {
@@ -402,6 +438,18 @@ func (a *application) startMonitor(writer http.ResponseWriter, request *http.Req
 	writeJSON(writer, http.StatusOK, result)
 }
 
+func (a *application) stopMonitor(writer http.ResponseWriter, request *http.Request) {
+	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	var result map[string]any
+	if err := a.callCore(ctx, "stop_monitor", struct{}{}, &result); err != nil {
+		writeCoreError(writer, err)
+		return
+	}
+	a.clearMonitor()
+	writeJSON(writer, http.StatusOK, result)
+}
+
 func (a *application) callCore(ctx context.Context, method string, params any, result any) error {
 	err := a.core.Call(ctx, method, params, result)
 	if err == nil {
@@ -458,6 +506,12 @@ func (a *application) savedMonitor() map[string]any {
 		copyParams[key] = value
 	}
 	return copyParams
+}
+
+func (a *application) clearMonitor() {
+	a.monitorMu.Lock()
+	a.monitorParams = nil
+	a.monitorMu.Unlock()
 }
 
 func (a *application) watchCore(ctx context.Context) {
@@ -567,6 +621,55 @@ func requestLogger(next http.Handler) http.Handler {
 		next.ServeHTTP(writer, request)
 		log.Printf("%s %s duration=%s", request.Method, request.URL.Path, time.Since(started).Round(time.Millisecond))
 	})
+}
+
+// webUIHandler serves a built single-page application from an explicitly
+// configured directory. The gateway is loopback-only, but the root validation
+// still prevents arbitrary paths from being served if a malformed URL arrives.
+func webUIHandler(root string) (http.Handler, error) {
+	if root == "" {
+		return nil, nil
+	}
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Web UI directory: %w", err)
+	}
+	index := filepath.Join(absoluteRoot, "index.html")
+	info, err := os.Stat(index)
+	if err != nil {
+		return nil, fmt.Errorf("read Web UI index: %w", err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("Web UI index is a directory: %s", index)
+	}
+	files := http.FileServer(http.Dir(absoluteRoot))
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet && request.Method != http.MethodHead {
+			http.NotFound(writer, request)
+			return
+		}
+		if strings.HasPrefix(request.URL.Path, "/v1/") {
+			http.NotFound(writer, request)
+			return
+		}
+
+		cleanPath := path.Clean("/" + request.URL.Path)
+		relativePath := strings.TrimPrefix(cleanPath, "/")
+		candidate := filepath.Join(absoluteRoot, filepath.FromSlash(relativePath))
+		relativeCandidate, err := filepath.Rel(absoluteRoot, candidate)
+		if err != nil || relativeCandidate == ".." || strings.HasPrefix(relativeCandidate, ".."+string(os.PathSeparator)) {
+			http.NotFound(writer, request)
+			return
+		}
+		if candidateInfo, statErr := os.Stat(candidate); statErr == nil && !candidateInfo.IsDir() {
+			files.ServeHTTP(writer, request)
+			return
+		}
+
+		// Frontend routes are resolved by Solid Router, so unknown browser paths
+		// intentionally receive the SPA entrypoint instead of a server 404.
+		http.ServeFile(writer, request, index)
+	}), nil
 }
 
 func requireLoopback(address string) error {

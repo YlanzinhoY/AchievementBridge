@@ -11,6 +11,7 @@ pub const Options = struct {
     interval_ms: u32 = 500,
     recover: bool = true,
     notifications: bool = true,
+    stop_requested: ?*const std.atomic.Value(bool) = null,
 };
 
 const TrackedProduct = struct {
@@ -56,7 +57,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     }
 
     std.debug.print("[UbisoftProvider] status=discovering mode=offline_spool\n", .{});
-    while (true) {
+    while (!shouldStop(options.stop_requested)) {
         var candidates = try discovery.discover(allocator, io, options.spool_root);
         defer candidates.deinit();
         for (candidates.items.items) |candidate| {
@@ -108,6 +109,10 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         }
         try std.Io.sleep(io, .fromMilliseconds(options.interval_ms), .awake);
     }
+}
+
+fn shouldStop(stop_requested: ?*const std.atomic.Value(bool)) bool {
+    return if (stop_requested) |flag| flag.load(.acquire) else false;
 }
 
 fn emitNew(
