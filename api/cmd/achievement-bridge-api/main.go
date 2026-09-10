@@ -405,16 +405,13 @@ func (a *application) startMonitor(writer http.ResponseWriter, request *http.Req
 	params := map[string]any{
 		"interval_ms":   input.IntervalMS,
 		"recover":       true,
-		"notifications": true,
+		"notifications": providerNotificationsEnabled(input.Notifications),
 	}
 	if input.JournalPath != nil {
 		params["journal_path"] = *input.JournalPath
 	}
 	if input.Recover != nil {
 		params["recover"] = *input.Recover
-	}
-	if input.Notifications != nil {
-		params["notifications"] = *input.Notifications
 	}
 	nativeToast := true
 	if input.NativeToast != nil {
@@ -436,6 +433,12 @@ func (a *application) startMonitor(writer http.ResponseWriter, request *http.Req
 	}
 	a.rememberMonitor(params)
 	writeJSON(writer, http.StatusOK, result)
+}
+
+func providerNotificationsEnabled(requested *bool) bool {
+	// Web mode owns the single branded Achievement Bridge tray icon. The Zig
+	// provider balloons each register a generic tray icon, so they are opt-in.
+	return requested != nil && *requested
 }
 
 func (a *application) stopMonitor(writer http.ResponseWriter, request *http.Request) {

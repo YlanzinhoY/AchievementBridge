@@ -48,7 +48,10 @@ export function BridgeCards() {
 
     setControlAction('starting')
     try {
-      await api.startMonitor()
+      // Web mode already has one persistent, branded tray owner. Provider
+      // balloons create one generic Windows tray icon per watcher, so keep
+      // them disabled here while native Steam toasts remain available.
+      await api.startMonitor({ notifications: false, native_toast: true })
       await dashboard.refresh()
     } catch {
       setControlAction('error')
