@@ -42,13 +42,12 @@ func (s *recoveringSupervisor) Ensure(context.Context) error {
 
 func (s *recoveringSupervisor) Events() *events.Broker { return s.broker }
 
-func TestCallCoreRestartsCoreAndRestoresMonitor(t *testing.T) {
+func TestCallCoreRestartsOnlyTheNativeCore(t *testing.T) {
 	client := &recoveringCore{}
 	supervisor := &recoveringSupervisor{core: client, broker: events.NewBroker(10)}
 	app := &application{core: client, supervisor: supervisor}
-	app.rememberMonitor(map[string]any{"interval_ms": uint32(500)})
 
-	if err := app.callCore(context.Background(), "inspect_games", struct{}{}, nil); err != nil {
+	if err := app.callCore(context.Background(), "list_achievements", struct{}{}, nil); err != nil {
 		t.Fatalf("callCore returned error: %v", err)
 	}
 	if supervisor.ensureRuns != 1 {
@@ -58,7 +57,7 @@ func TestCallCoreRestartsCoreAndRestoresMonitor(t *testing.T) {
 	client.mu.Lock()
 	methods := append([]string(nil), client.methods...)
 	client.mu.Unlock()
-	want := []string{"inspect_games", "health", "start_monitor", "inspect_games"}
+	want := []string{"list_achievements", "health", "list_achievements"}
 	if len(methods) != len(want) {
 		t.Fatalf("methods = %v, want %v", methods, want)
 	}

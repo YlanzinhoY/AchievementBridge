@@ -23,13 +23,16 @@ import (
 
 	"github.com/YlanzinhoY/AchievementBridge/api/internal/core"
 	"github.com/YlanzinhoY/AchievementBridge/api/internal/events"
+	"github.com/YlanzinhoY/AchievementBridge/api/internal/games"
 	"github.com/YlanzinhoY/AchievementBridge/api/internal/gamestamp"
+	monitoring "github.com/YlanzinhoY/AchievementBridge/api/internal/monitor"
+	"github.com/YlanzinhoY/AchievementBridge/api/internal/providers"
+	"github.com/YlanzinhoY/AchievementBridge/api/internal/support"
 )
 
 const (
 	defaultAPIAddress   = "127.0.0.1:47650"
 	defaultCoreAddress  = "127.0.0.1:47651"
-	coreStartupTimeout  = 3 * time.Minute
 	coreRecoveryTimeout = 15 * time.Second
 )
 
@@ -39,10 +42,11 @@ type application struct {
 	eventSync  *eventSyncer
 	shutdown   func()
 	webUI      bool
+	steamRoot  string
 
-	recoveryMu    sync.Mutex
-	monitorMu     sync.RWMutex
-	monitorParams map[string]any
+	recoveryMu sync.Mutex
+	monitorMu  sync.Mutex
+	monitor    *monitoring.Manager
 }
 
 type coreCaller interface {
@@ -72,14 +76,15 @@ type achievementCatalog struct {
 }
 
 type gameSupport struct {
-	AppID            uint32  `json:"app_id"`
-	Name             string  `json:"name"`
-	Directory        string  `json:"directory"`
-	Provider         string  `json:"provider"`
-	Confidence       uint8   `json:"confidence"`
-	AchievementCount *uint64 `json:"achievement_count"`
-	StateAvailable   bool    `json:"state_available"`
-	Status           string  `json:"status"`
+	AppID             uint32  `json:"app_id"`
+	Name              string  `json:"name"`
+	Directory         string  `json:"directory"`
+	Provider          string  `json:"provider"`
+	Confidence        uint8   `json:"confidence"`
+	AchievementCount  *uint64 `json:"achievement_count"`
+	StateAvailable    bool    `json:"state_available"`
+	Status            string  `json:"status"`
+	ProviderProductID *uint32 `json:"provider_product_id,omitempty"`
 }
 
 type previewRequest struct {
@@ -114,19 +119,12 @@ func main() {
 
 	coreClient := core.NewClient(*coreAddress)
 	supervisor := core.NewSupervisor(coreClient, *coreExecutable, *coreAddress, *steamRoot)
-	// A pending preview recovery can legitimately wait through Steam's
-	// StoreStats rate limit before the core begins accepting requests.
-	startupContext, cancel := context.WithTimeout(context.Background(), coreStartupTimeout)
-	if err := supervisor.Ensure(startupContext); err != nil {
-		cancel()
-		log.Fatal(err)
-	}
-	cancel()
 	defer supervisor.Close()
 
 	app := &application{
 		core:       coreClient,
 		supervisor: supervisor,
+		steamRoot:  *steamRoot,
 	}
 	stampStore := gamestamp.New(gamestamp.DefaultRoot())
 	if imported, err := stampStore.ImportJournal(gamestamp.DefaultJournalPath(), gamestamp.DefaultSupportRoot()); err != nil && !os.IsNotExist(err) {
@@ -134,7 +132,7 @@ func main() {
 	} else if imported > 0 {
 		log.Printf("game stamps loaded from journal achievements=%d", imported)
 	}
-	app.eventSync = newEventSyncer(app.callCore, supervisor.Events(), stampStore)
+	app.eventSync = newEventSyncer(app.callCore, stampStore)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", app.health)
 	mux.HandleFunc("GET /v1/games", app.listGames)
@@ -178,9 +176,9 @@ func main() {
 	}
 	shutdownContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go app.watchCore(shutdownContext)
 	go func() {
 		<-shutdownContext.Done()
+		app.stopGoMonitor()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = server.Shutdown(ctx)
@@ -198,31 +196,139 @@ func (a *application) listGames(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusBadRequest, "invalid_verify_schema", "verify_schema must be true or false")
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Minute)
-	defer cancel()
-	var result struct {
-		Games []gameSupport `json:"games"`
-	}
-	if err := a.callCore(ctx, "inspect_games", map[string]any{"verify_schema": verifySchema}, &result); err != nil {
-		writeCoreError(writer, err)
+	catalog, err := games.Discover(a.steamRoot)
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "steam_library_unavailable", err.Error())
 		return
+	}
+	manifests := support.LoadAll(support.DefaultRoot())
+	result := struct {
+		Games []gameSupport `json:"games"`
+	}{Games: make([]gameSupport, 0, len(catalog.Apps))}
+	for _, installed := range catalog.Apps {
+		report := gameSupport{
+			AppID:     installed.AppID,
+			Name:      installed.Name,
+			Directory: installed.InstallDir,
+			Provider:  "none",
+			Status:    "SEM SUPORTE",
+		}
+		if manifest, found := manifests[installed.AppID]; found {
+			report.Provider = strings.ToLower(manifest.Provider)
+			report.Confidence = 100
+			report.ProviderProductID = optionalUint32(manifest.ProviderProduct)
+			report.AchievementCount = optionalUint64(manifest.CatalogCount)
+			report.StateAvailable = manifest.SourceState != "" && fileExists(manifest.SourceState)
+			if report.Provider == "uplay_r2" {
+				if manifest.ProviderProduct != 0 && report.StateAvailable {
+					report.Status = "COMPLETO"
+				} else {
+					report.Status = "AGUARDA DADOS"
+				}
+			}
+		} else if runtime, found := selectGoProvider(games.DetectRuntime(installed)); found {
+			report.Provider = runtime.Provider
+			report.Confidence = runtime.Confidence
+			report.StateAvailable = runtime.Provider != "rockstar" || installed.AppID == 3240220
+			report.Status = classifyGameSupport(report.Provider, report.Confidence, report.StateAvailable)
+		}
+		if verifySchema && supportsGoSync(report.Provider, report.Confidence) && report.AchievementCount == nil {
+			ctx, cancel := context.WithTimeout(request.Context(), 45*time.Second)
+			var catalog achievementCatalog
+			if err := a.callCore(ctx, "list_achievements", map[string]any{"app_id": installed.AppID}, &catalog); err == nil {
+				count := uint64(len(catalog.Achievements))
+				report.AchievementCount = &count
+				if count == 0 {
+					report.Status = "SEM CATÁLOGO"
+				}
+			}
+			cancel()
+		}
+		result.Games = append(result.Games, report)
 	}
 	writeJSON(writer, http.StatusOK, result)
 }
 
-func (a *application) health(writer http.ResponseWriter, request *http.Request) {
-	ctx, cancel := context.WithTimeout(request.Context(), coreRecoveryTimeout+time.Second)
-	defer cancel()
-	var coreHealth map[string]any
-	if err := a.callCore(ctx, "health", struct{}{}, &coreHealth); err != nil {
-		writeError(writer, http.StatusServiceUnavailable, "core_unavailable", err.Error())
-		return
+func selectGoProvider(runtimes []games.Runtime) (games.Runtime, bool) {
+	for _, runtime := range runtimes {
+		switch runtime.Provider {
+		case "gse", "rune", "rockstar", "uplay_r2", "ubisoft", "steam":
+			return runtime, true
+		}
 	}
+	return games.Runtime{}, false
+}
+
+func supportsGoSync(provider string, confidence uint8) bool {
+	return confidence >= 60 && (provider == "gse" || provider == "rune" || provider == "rockstar" || provider == "uplay_r2")
+}
+
+func classifyGameSupport(provider string, confidence uint8, stateAvailable bool) string {
+	if supportsGoSync(provider, confidence) {
+		if provider == "rockstar" && !stateAvailable {
+			return "AGUARDA DADOS"
+		}
+		return "COMPLETO"
+	}
+	if confidence >= 60 && (provider == "ubisoft" || provider == "uplay_r2") {
+		return "SÓ DETECTA"
+	}
+	if confidence >= 50 && provider == "steam" {
+		return "NATIVO"
+	}
+	return "SEM SUPORTE"
+}
+
+func optionalUint32(value uint32) *uint32 {
+	if value == 0 {
+		return nil
+	}
+	copy := value
+	return &copy
+}
+
+func optionalUint64(value uint64) *uint64 {
+	if value == 0 {
+		return nil
+	}
+	copy := value
+	return &copy
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func (a *application) health(writer http.ResponseWriter, request *http.Request) {
+	// The native Zig adapter is intentionally lazy in 0.3. Merely opening the
+	// Web UI or polling health must not create another background process.
+	ctx, cancel := context.WithTimeout(request.Context(), 500*time.Millisecond)
+	defer cancel()
+	coreHealth := map[string]any{
+		"service":             "achievement-bridge-native-core",
+		"status":              "idle",
+		"monitoring":          false,
+		"stopping":            false,
+		"steam_session_scope": "request",
+		"protocol_version":    1,
+	}
+	var runningCore map[string]any
+	if err := a.core.Call(ctx, "health", struct{}{}, &runningCore); err == nil {
+		coreHealth = runningCore
+	}
+	monitorStatus := monitoring.Status{}
+	a.monitorMu.Lock()
+	if a.monitor != nil {
+		monitorStatus = a.monitor.Status()
+	}
+	a.monitorMu.Unlock()
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"service": "achievement-bridge-api",
 		"status":  "ready",
 		"core":    coreHealth,
 		"web_ui":  a.webUI,
+		"monitor": monitorStatus,
 	})
 }
 
@@ -356,12 +462,72 @@ func (a *application) syncAchievement(writer http.ResponseWriter, request *http.
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Minute)
 	defer cancel()
+	if err := a.verifyProviderAchievement(ctx, input.AppID, input.Provider, input.Achievement); err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "provider_state_unverified", err.Error())
+		return
+	}
 	var result map[string]any
-	if err := a.callCore(ctx, "sync_achievement", params, &result); err != nil {
+	if err := a.callCore(ctx, "store_steam_achievement", params, &result); err != nil {
 		writeCoreError(writer, err)
 		return
 	}
 	writeJSON(writer, http.StatusOK, result)
+}
+
+func (a *application) verifyProviderAchievement(ctx context.Context, appID uint32, provider, achievement string) error {
+	catalog, err := games.Discover(a.steamRoot)
+	if err != nil {
+		return err
+	}
+	var installed games.Installed
+	for _, game := range catalog.Apps {
+		if game.AppID == appID {
+			installed = game
+			break
+		}
+	}
+	if installed.AppID == 0 {
+		return fmt.Errorf("AppID %d is not installed", appID)
+	}
+	providerGame := providers.Game{AppID: appID, Name: installed.Name, InstallDir: installed.InstallDir, Provider: provider}
+	if manifest, found := support.LoadAll(support.DefaultRoot())[appID]; found && strings.EqualFold(manifest.Provider, provider) {
+		providerGame.ProviderProductID = manifest.ProviderProduct
+		providerGame.SourceState = manifest.SourceState
+	}
+	watcher, err := providers.Open(providerGame, a.sampleNativeProvider)
+	if err != nil {
+		return err
+	}
+	defer watcher.Close()
+	state, err := watcher.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if current, found := state[achievement]; found && current.Unlocked {
+		return nil
+	}
+	suffix := achievementNumericSuffix(achievement)
+	if suffix != "" {
+		if current, found := state[suffix]; found && current.Unlocked {
+			return nil
+		}
+	}
+	return fmt.Errorf("achievement %s is not unlocked in %s", achievement, provider)
+}
+
+func achievementNumericSuffix(value string) string {
+	start := len(value)
+	for start > 0 && value[start-1] >= '0' && value[start-1] <= '9' {
+		start--
+	}
+	if start == len(value) {
+		return ""
+	}
+	trimmed := strings.TrimLeft(value[start:], "0")
+	if trimmed == "" {
+		return "0"
+	}
+	return trimmed
 }
 
 func (a *application) prepareGameSupport(writer http.ResponseWriter, request *http.Request) {
@@ -371,14 +537,58 @@ func (a *application) prepareGameSupport(writer http.ResponseWriter, request *ht
 		writeError(writer, http.StatusBadRequest, "invalid_app_id", "app_id must be a positive integer")
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Minute)
+	catalog, err := games.Discover(a.steamRoot)
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "steam_library_unavailable", err.Error())
+		return
+	}
+	var installed games.Installed
+	for _, candidate := range catalog.Apps {
+		if candidate.AppID == uint32(appID64) {
+			installed = candidate
+			break
+		}
+	}
+	if installed.AppID == 0 {
+		writeError(writer, http.StatusNotFound, "game_not_installed", "Steam game is not installed")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 45*time.Second)
 	defer cancel()
-	var result map[string]any
-	if err := a.callCore(ctx, "prepare_game_support", map[string]any{"app_id": uint32(appID64)}, &result); err != nil {
+	var achievementList achievementCatalog
+	if err := a.callCore(ctx, "list_achievements", map[string]any{"app_id": installed.AppID}, &achievementList); err != nil {
 		writeCoreError(writer, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, result)
+	providerAchievements := make([]support.Achievement, 0, len(achievementList.Achievements))
+	for _, item := range achievementList.Achievements {
+		providerAchievements = append(providerAchievements, support.Achievement{
+			APIName: item.APIName, Name: item.Name, Description: item.Description,
+		})
+	}
+	prepared, err := support.PrepareUplayR2(
+		support.DefaultRoot(), installed.AppID, installed.Name, installed.InstallDir, providerAchievements,
+	)
+	if err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "provider_setup_failed", err.Error())
+		return
+	}
+	status := "AGUARDA DADOS"
+	if prepared.Manifest.Capabilities.SyncToSteam {
+		status = "COMPLETO"
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"app_id":              installed.AppID,
+		"game":                installed.Name,
+		"provider":            prepared.Manifest.Provider,
+		"provider_product_id": prepared.Manifest.ProviderProduct,
+		"achievement_count":   prepared.Manifest.CatalogCount,
+		"schema_path":         prepared.SchemaPath,
+		"config_path":         prepared.ConfigPath,
+		"manifest_path":       prepared.ManifestPath,
+		"status":              status,
+		"orchestrator":        "go",
+	})
 }
 
 func (a *application) startMonitor(writer http.ResponseWriter, request *http.Request) {
@@ -402,16 +612,9 @@ func (a *application) startMonitor(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusBadRequest, "invalid_interval", "interval_ms must be at least 100")
 		return
 	}
-	params := map[string]any{
-		"interval_ms":   input.IntervalMS,
-		"recover":       true,
-		"notifications": providerNotificationsEnabled(input.Notifications),
-	}
-	if input.JournalPath != nil {
-		params["journal_path"] = *input.JournalPath
-	}
+	recoverEvents := true
 	if input.Recover != nil {
-		params["recover"] = *input.Recover
+		recoverEvents = *input.Recover
 	}
 	nativeToast := true
 	if input.NativeToast != nil {
@@ -424,15 +627,56 @@ func (a *application) startMonitor(writer http.ResponseWriter, request *http.Req
 	if a.eventSync != nil {
 		a.eventSync.Start(nativeToast)
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
-	defer cancel()
-	var result map[string]any
-	if err := a.callCore(ctx, "start_monitor", params, &result); err != nil {
-		writeCoreError(writer, err)
+	journalPath := ""
+	if input.JournalPath != nil {
+		journalPath = strings.TrimSpace(*input.JournalPath)
+	}
+	a.monitorMu.Lock()
+	defer a.monitorMu.Unlock()
+	if a.monitor != nil && a.monitor.Status().Running {
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"monitoring":   true,
+			"orchestrator": "go",
+			"scope":        "active_game_sessions",
+		})
 		return
 	}
-	a.rememberMonitor(params)
-	writeJSON(writer, http.StatusOK, result)
+	manager, err := monitoring.New(monitoring.Options{
+		SteamRoot:     a.steamRoot,
+		JournalPath:   journalPath,
+		Interval:      time.Duration(input.IntervalMS) * time.Millisecond,
+		SessionScan:   time.Second,
+		FinalGrace:    3 * time.Second,
+		Recover:       recoverEvents,
+		Broker:        a.supervisor.Events(),
+		NativeSampler: a.sampleNativeProvider,
+		OnAchievement: func(event providers.Event) {
+			var timestamp *uint32
+			if event.Timestamp > 0 && event.Timestamp <= int64(^uint32(0)) {
+				value := uint32(event.Timestamp)
+				timestamp = &value
+			}
+			a.eventSync.Submit(achievementEvent{
+				AppID: event.AppID, Provider: event.Provider,
+				Achievement: event.Achievement, Timestamp: timestamp,
+			})
+		},
+	})
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "monitor_unavailable", err.Error())
+		return
+	}
+	if err := manager.Start(); err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "monitor_start_failed", err.Error())
+		return
+	}
+	a.monitor = manager
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"monitoring":          true,
+		"orchestrator":        "go",
+		"scope":               "active_game_sessions",
+		"final_poll_grace_ms": 3000,
+	})
 }
 
 func providerNotificationsEnabled(requested *bool) bool {
@@ -444,13 +688,35 @@ func providerNotificationsEnabled(requested *bool) bool {
 func (a *application) stopMonitor(writer http.ResponseWriter, request *http.Request) {
 	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
 	defer cancel()
-	var result map[string]any
-	if err := a.callCore(ctx, "stop_monitor", struct{}{}, &result); err != nil {
-		writeCoreError(writer, err)
+	a.monitorMu.Lock()
+	manager := a.monitor
+	a.monitor = nil
+	a.monitorMu.Unlock()
+	if manager != nil {
+		if err := manager.Stop(ctx); err != nil {
+			writeError(writer, http.StatusServiceUnavailable, "monitor_stop_failed", err.Error())
+			return
+		}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"monitoring":   false,
+		"orchestrator": "go",
+	})
+}
+
+func (a *application) stopGoMonitor() {
+	a.monitorMu.Lock()
+	manager := a.monitor
+	a.monitor = nil
+	a.monitorMu.Unlock()
+	if manager == nil {
 		return
 	}
-	a.clearMonitor()
-	writeJSON(writer, http.StatusOK, result)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := manager.Stop(ctx); err != nil {
+		log.Printf("stop Go monitor: %v", err)
+	}
 }
 
 func (a *application) callCore(ctx context.Context, method string, params any, result any) error {
@@ -466,76 +732,39 @@ func (a *application) callCore(ctx context.Context, method string, params any, r
 	a.recoveryMu.Lock()
 	defer a.recoveryMu.Unlock()
 
-	probeContext, cancelProbe := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	probeContext, cancelProbe := context.WithTimeout(ctx, 500*time.Millisecond)
 	probeErr := a.core.Call(probeContext, "health", struct{}{}, nil)
 	cancelProbe()
 	if probeErr != nil {
-		recoveryContext, cancelRecovery := context.WithTimeout(context.Background(), coreRecoveryTimeout)
+		recoveryContext, cancelRecovery := context.WithTimeout(ctx, coreRecoveryTimeout)
 		defer cancelRecovery()
 		if ensureErr := a.supervisor.Ensure(recoveryContext); ensureErr != nil {
 			return fmt.Errorf("recover Zig core after %v: %w", err, ensureErr)
 		}
-		if monitorParams := a.savedMonitor(); monitorParams != nil {
-			var ignored map[string]any
-			if restoreErr := a.core.Call(recoveryContext, "start_monitor", monitorParams, &ignored); restoreErr != nil {
-				return fmt.Errorf("restore monitoring after core recovery: %w", restoreErr)
-			}
-			log.Printf("Zig core recovered; achievement monitoring resumed")
-		} else {
-			log.Printf("Zig core recovered")
-		}
+		log.Printf("Zig native core recovered")
 	}
 	return a.core.Call(ctx, method, params, result)
 }
 
-func (a *application) rememberMonitor(params map[string]any) {
-	copyParams := make(map[string]any, len(params))
-	for key, value := range params {
-		copyParams[key] = value
+func (a *application) sampleNativeProvider(ctx context.Context, appID uint32) (providers.Snapshot, error) {
+	var result struct {
+		Active       bool     `json:"active"`
+		Achievements []string `json:"achievements"`
 	}
-	a.monitorMu.Lock()
-	a.monitorParams = copyParams
-	a.monitorMu.Unlock()
-}
-
-func (a *application) savedMonitor() map[string]any {
-	a.monitorMu.RLock()
-	defer a.monitorMu.RUnlock()
-	if a.monitorParams == nil {
-		return nil
+	if err := a.callCore(ctx, "sample_native_provider", map[string]any{
+		"app_id":   appID,
+		"provider": "rockstar",
+	}, &result); err != nil {
+		return nil, err
 	}
-	copyParams := make(map[string]any, len(a.monitorParams))
-	for key, value := range a.monitorParams {
-		copyParams[key] = value
+	if !result.Active {
+		return nil, providers.ErrStateUnavailable
 	}
-	return copyParams
-}
-
-func (a *application) clearMonitor() {
-	a.monitorMu.Lock()
-	a.monitorParams = nil
-	a.monitorMu.Unlock()
-}
-
-func (a *application) watchCore(ctx context.Context) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if a.savedMonitor() == nil {
-				continue
-			}
-			probeContext, cancel := context.WithTimeout(context.Background(), coreRecoveryTimeout+time.Second)
-			var ignored map[string]any
-			if err := a.callCore(probeContext, "health", struct{}{}, &ignored); err != nil {
-				log.Printf("Zig core watchdog: %v", err)
-			}
-			cancel()
-		}
+	state := make(providers.Snapshot, len(result.Achievements))
+	for _, achievement := range result.Achievements {
+		state[achievement] = providers.AchievementState{Unlocked: true}
 	}
+	return state, nil
 }
 
 func (a *application) monitorEvents(writer http.ResponseWriter, request *http.Request) {
@@ -586,6 +815,7 @@ func (a *application) monitorEvents(writer http.ResponseWriter, request *http.Re
 
 func (a *application) shutdownAPI(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]string{"status": "shutting_down"})
+	a.stopGoMonitor()
 	if a.shutdown != nil {
 		a.shutdown()
 	}

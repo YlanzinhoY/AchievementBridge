@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/YlanzinhoY/AchievementBridge/api/internal/events"
 	"github.com/YlanzinhoY/AchievementBridge/api/internal/gamestamp"
 )
 
@@ -73,18 +72,18 @@ func syncProvider(provider string) bool {
 
 type eventSyncer struct {
 	call        func(context.Context, string, any, any) error
-	broker      *events.Broker
 	stamps      achievementStampWriter
 	once        sync.Once
 	nativeToast atomic.Bool
+	inbox       chan achievementEvent
 }
 
 type achievementStampWriter interface {
 	Record(gamestamp.Event) error
 }
 
-func newEventSyncer(call func(context.Context, string, any, any) error, broker *events.Broker, stamps achievementStampWriter) *eventSyncer {
-	return &eventSyncer{call: call, broker: broker, stamps: stamps}
+func newEventSyncer(call func(context.Context, string, any, any) error, stamps achievementStampWriter) *eventSyncer {
+	return &eventSyncer{call: call, stamps: stamps, inbox: make(chan achievementEvent, 128)}
 }
 
 func (s *eventSyncer) Start(nativeToast bool) {
@@ -93,22 +92,14 @@ func (s *eventSyncer) Start(nativeToast bool) {
 }
 
 func (s *eventSyncer) run() {
-	stream, history, unsubscribe := s.broker.Subscribe()
-	defer unsubscribe()
-	parser := &achievementEventParser{}
-	consume := func(line string) {
-		event := parser.Push(line)
-		if event == nil {
-			return
-		}
-		s.syncEvent(event)
+	for event := range s.inbox {
+		current := event
+		s.syncEvent(&current)
 	}
-	for _, line := range history {
-		consume(line)
-	}
-	for line := range stream {
-		consume(line)
-	}
+}
+
+func (s *eventSyncer) Submit(event achievementEvent) {
+	s.inbox <- event
 }
 
 func (s *eventSyncer) syncEvent(event *achievementEvent) {
@@ -125,7 +116,7 @@ func (s *eventSyncer) syncEvent(event *achievementEvent) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	var result map[string]any
-	if err := s.call(ctx, "sync_achievement", params, &result); err != nil {
+	if err := s.call(ctx, "store_steam_achievement", params, &result); err != nil {
 		s.recordStamp(event, "failed", "", "")
 		log.Printf("automatic Steam sync failed appid=%d achievement=%s provider=%s: %v", event.AppID, event.Achievement, event.Provider, err)
 		return

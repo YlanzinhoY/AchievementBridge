@@ -22,7 +22,7 @@ func TestEventSyncerStampsDetectedAndSyncedAchievement(t *testing.T) {
 	syncer := &eventSyncer{
 		stamps: stamps,
 		call: func(_ context.Context, method string, _ any, result any) error {
-			if method != "sync_achievement" {
+			if method != "store_steam_achievement" {
 				t.Fatalf("unexpected core method: %s", method)
 			}
 			output := result.(*map[string]any)

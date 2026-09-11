@@ -1,11 +1,19 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type unavailableCore struct{}
+
+func (unavailableCore) Call(context.Context, string, any, any) error {
+	return errors.New("native core is not running")
+}
 
 func TestRequireLoopback(t *testing.T) {
 	for _, address := range []string{"127.0.0.1:47650", "[::1]:47650"} {
@@ -35,6 +43,18 @@ func TestMonitorRejectsUnsafePollingInterval(t *testing.T) {
 	(&application{}).startMonitor(recorder, request)
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "invalid_interval") {
 		t.Fatalf("unexpected response: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHealthKeepsNativeCoreLazy(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
+	recorder := httptest.NewRecorder()
+	(&application{core: unavailableCore{}}).health(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected response: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"status":"idle"`) {
+		t.Fatalf("health must expose an idle native adapter: %s", recorder.Body.String())
 	}
 }
 

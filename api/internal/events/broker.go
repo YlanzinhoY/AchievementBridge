@@ -22,9 +22,9 @@ func NewBroker(maxHistory int) *Broker {
 func (b *Broker) Publish(line string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.maxHistory > 0 {
+	if b.maxHistory >= 0 {
 		b.history = append(b.history, line)
-		if len(b.history) > b.maxHistory {
+		if b.maxHistory > 0 && len(b.history) > b.maxHistory {
 			copy(b.history, b.history[len(b.history)-b.maxHistory:])
 			b.history = b.history[:b.maxHistory]
 		}
