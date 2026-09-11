@@ -27,18 +27,25 @@ export interface ApiErrorBody {
 }
 
 export interface CoreHealth {
-  service: 'achievement-bridge-core'
-  status: 'ready'
+  service: 'achievement-bridge-core' | 'achievement-bridge-native-core'
+  status: 'ready' | 'idle'
   protocol_version: number
   steam_session_scope: 'request'
   monitoring: boolean
   stopping: boolean
 }
 
+export interface MonitorHealth {
+  running: boolean
+  active_sessions: number
+}
+
 export interface HealthResponse {
   service: 'achievement-bridge-api'
   status: 'ready'
   core: CoreHealth
+  monitor: MonitorHealth
+  web_ui: boolean
 }
 
 export interface GameSupport {
@@ -169,7 +176,10 @@ export interface StartMonitorRequest {
 
 export interface StartMonitorResponse {
   monitoring: boolean
-  interval_ms: number
+  interval_ms?: number
+  orchestrator?: 'go'
+  scope?: 'active_game_sessions'
+  final_poll_grace_ms?: number
 }
 
 export interface StopMonitorResponse {

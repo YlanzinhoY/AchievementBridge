@@ -18,7 +18,7 @@ export function BridgeCards() {
     'idle' | 'starting' | 'stopping' | 'error'
   >('idle')
 
-  const isMonitoring = createMemo(() => dashboard.health()?.core.monitoring ?? false)
+  const isMonitoring = createMemo(() => dashboard.health()?.monitor.running ?? false)
   const isStopping = createMemo(() => dashboard.health()?.core.stopping ?? false)
 
   const status = createMemo(() => {
