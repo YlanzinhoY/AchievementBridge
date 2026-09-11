@@ -117,9 +117,9 @@ export interface AchievementPreviewRollbackRequest {
 export interface AchievementPreviewRollbackResponse {
   app_id: number
   achievement: string
-  name: string
-  rollback_stored: boolean
-  state_after: 'locked'
+  preview_state_changed: false
+  rollback_required: false
+  state_after: 'unchanged'
 }
 
 export interface AchievementSyncRequest {
@@ -130,41 +130,30 @@ export interface AchievementSyncRequest {
   native_toast?: boolean
 }
 
-export interface SteamAbiSyncResponse {
-  app_id: number
-  achievement: string
-  provider: AchievementSyncRequest['provider']
-  route: 'steam_abi'
-  result: 'already_unlocked' | 'stored'
-  server_acknowledged: true
-}
-
 export type NativeNotificationStatus =
   | 'not_requested'
   | 'not_new'
-  | 'store_queued'
   | 'progress_queued'
-  | 'already_unlocked'
   | 'steam_unavailable'
-  | 'stats_unavailable'
-  | 'set_failed'
   | 'progress_failed'
-  | 'store_failed'
   | 'sync_unconfirmed'
 
-export interface SteamLocalCacheSyncResponse {
+export interface SteamLocalProjectionSyncResponse {
   app_id: number
   achievement: string
   provider: AchievementSyncRequest['provider']
-  route: 'steam_local_cache'
-  direct_error: string | null
+  route: 'steam_local_projection'
+  server_request: false
   changed: boolean
-  cache_confirmed: boolean
-  steam_confirmed: boolean
+  projection_confirmed: boolean
+  host_status: 'captured' | 'unavailable' | 'app_not_managed' | 'stats_sync_disabled' | 'rejected'
+  stat_id: number
+  bit: number
+  permission: number
   native_notification: NativeNotificationStatus
 }
 
-export type AchievementSyncResponse = SteamAbiSyncResponse | SteamLocalCacheSyncResponse
+export type AchievementSyncResponse = SteamLocalProjectionSyncResponse
 
 export interface StartMonitorRequest {
   interval_ms?: number

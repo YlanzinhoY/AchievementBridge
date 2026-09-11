@@ -418,17 +418,13 @@ func (a *application) rollbackAchievementPreview(writer http.ResponseWriter, req
 		writeError(writer, http.StatusBadRequest, "invalid_request", "app_id and achievement are required")
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Minute)
-	defer cancel()
-	var result map[string]any
-	if err := a.callCore(ctx, "rollback_achievement_preview", map[string]any{
-		"app_id":      input.AppID,
-		"achievement": input.Achievement,
-	}, &result); err != nil {
-		writeCoreError(writer, err)
-		return
-	}
-	writeJSON(writer, http.StatusOK, result)
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"app_id":                input.AppID,
+		"achievement":           input.Achievement,
+		"preview_state_changed": false,
+		"rollback_required":     false,
+		"state_after":           "unchanged",
+	})
 }
 
 func (a *application) syncAchievement(writer http.ResponseWriter, request *http.Request) {
@@ -467,7 +463,7 @@ func (a *application) syncAchievement(writer http.ResponseWriter, request *http.
 		return
 	}
 	var result map[string]any
-	if err := a.callCore(ctx, "store_steam_achievement", params, &result); err != nil {
+	if err := a.callCore(ctx, "project_local_achievement", params, &result); err != nil {
 		writeCoreError(writer, err)
 		return
 	}

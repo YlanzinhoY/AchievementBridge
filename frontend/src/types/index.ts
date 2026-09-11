@@ -21,6 +21,5 @@ export type {
   StartMonitorRequest,
   StartMonitorResponse,
   StopMonitorResponse,
-  SteamAbiSyncResponse,
-  SteamLocalCacheSyncResponse,
+  SteamLocalProjectionSyncResponse,
 } from './api'

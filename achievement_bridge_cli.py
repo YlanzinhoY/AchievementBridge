@@ -161,9 +161,7 @@ class BridgeApiClient:
                 )
 
             last_error: Exception | None = None
-            # The Zig core may be completing an interrupted Steam preview.
-            # StoreStats recovery is intentionally allowed to outlive the
-            # normal fast startup path.
+            # Allow the local Zig core enough time to start on slower disks.
             for _ in range(1800):
                 time.sleep(0.1)
                 try:

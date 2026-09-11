@@ -7,7 +7,6 @@ pub const default_port: u16 = 47_651;
 pub const Options = struct {
     port: u16 = default_port,
     steam_root: ?[]const u8 = null,
-    preview_transaction_path: []const u8,
     backup_root: []const u8,
 };
 
@@ -32,7 +31,6 @@ const State = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     steam_root: ?[]u8,
-    preview_transaction_path: []u8,
     backup_root: []u8,
     gtav_enhanced: bridge.providers.rockstar.games.gtav_enhanced.Monitor,
 
@@ -40,14 +38,12 @@ const State = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         steam_root: ?[]const u8,
-        preview_transaction_path: []const u8,
         backup_root: []const u8,
     ) !State {
         return .{
             .allocator = allocator,
             .io = io,
             .steam_root = if (steam_root) |root| try allocator.dupe(u8, root) else null,
-            .preview_transaction_path = try allocator.dupe(u8, preview_transaction_path),
             .backup_root = try allocator.dupe(u8, backup_root),
             .gtav_enhanced = bridge.providers.rockstar.games.gtav_enhanced.Monitor.init(allocator),
         };
@@ -56,7 +52,6 @@ const State = struct {
     fn deinit(self: *State) void {
         self.gtav_enhanced.deinit();
         if (self.steam_root) |root| self.allocator.free(root);
-        self.allocator.free(self.preview_transaction_path);
         self.allocator.free(self.backup_root);
         self.* = undefined;
     }
@@ -70,28 +65,6 @@ const State = struct {
     fn connectSession(self: *State, app_id: u32) !bridge.steam.adapter.Session {
         return bridge.steam.adapter.connect(self.allocator, app_id, try self.getSteamRoot());
     }
-
-    fn recoverPendingPreview(self: *State) !void {
-        var pending = (try bridge.steam.preview_transaction.load(
-            self.allocator,
-            self.io,
-            self.preview_transaction_path,
-        )) orelse return;
-        defer pending.deinit();
-        var session = try self.connectSession(pending.app_id);
-        defer session.close();
-        const cleared = try bridge.steam.adapter.rollbackAchievementPreview(
-            &session,
-            self.allocator,
-            self.io,
-            pending.achievement,
-        );
-        try bridge.steam.preview_transaction.clear(self.io, self.preview_transaction_path);
-        std.debug.print(
-            "[SteamNotificationPreview] recovery=true appid={d} achievement={s} cleared={} state_after=locked\n",
-            .{ pending.app_id, pending.achievement, cleared },
-        );
-    }
 };
 
 pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
@@ -99,7 +72,6 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         allocator,
         io,
         options.steam_root,
-        options.preview_transaction_path,
         options.backup_root,
     );
     defer state.deinit();
@@ -111,9 +83,6 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         "[AchievementBridgeCore] status=ready address=127.0.0.1 port={d} protocol={d}\n",
         .{ options.port, protocol_version },
     );
-    state.recoverPendingPreview() catch |err|
-        std.debug.print("[SteamNotificationPreview] recovery_pending=true error={s}\n", .{@errorName(err)});
-
     while (true) {
         var stream = server.accept(io) catch |err| {
             std.debug.print("[AchievementBridgeCore] accept_error={s}\n", .{@errorName(err)});
@@ -216,7 +185,6 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         return;
     }
     if (std.mem.eql(u8, request.method, "preview_achievement")) {
-        try state.recoverPendingPreview();
         const app_id = request.params.app_id orelse return error.MissingAppId;
         const wanted = request.params.achievement orelse return error.MissingAchievement;
         const duration_ms = request.params.duration_ms orelse 7000;
@@ -253,80 +221,14 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         });
         return;
     }
-    if (std.mem.eql(u8, request.method, "rollback_achievement_preview")) {
-        const app_id = request.params.app_id orelse return error.MissingAppId;
-        const wanted = request.params.achievement orelse return error.MissingAchievement;
-        var session = try state.connectSession(app_id);
-        defer session.close();
-        try session.client.loadCurrentUserStats(state.io, app_id, 10_000);
-        var achievements = try bridge.steam.adapter.listAchievements(&session, allocator);
-        defer achievements.deinit();
-        const achievement = findAchievement(achievements.items.items, wanted) orelse return error.AchievementNotFound;
-        const cleared = try bridge.steam.adapter.rollbackAchievementPreview(
-            &session,
-            allocator,
-            state.io,
-            achievement.api_name,
-        );
-        if (try bridge.steam.preview_transaction.load(allocator, state.io, state.preview_transaction_path)) |loaded| {
-            var pending = loaded;
-            defer pending.deinit();
-            if (pending.app_id == app_id and std.ascii.eqlIgnoreCase(pending.achievement, achievement.api_name))
-                try bridge.steam.preview_transaction.clear(state.io, state.preview_transaction_path);
-        }
-        try writeSuccess(allocator, writer, request.id, .{
-            .app_id = app_id,
-            .achievement = achievement.api_name,
-            .name = achievement.name,
-            .rollback_stored = cleared,
-            .state_after = "locked",
-        });
-        return;
-    }
-    if (std.mem.eql(u8, request.method, "store_steam_achievement")) {
+    if (std.mem.eql(u8, request.method, "project_local_achievement")) {
         const app_id = request.params.app_id orelse return error.MissingAppId;
         const wanted = request.params.achievement orelse return error.MissingAchievement;
         const provider = request.params.provider orelse return error.MissingProvider;
 
-        var direct_error: ?[]const u8 = null;
-        var canonical_achievement = wanted;
-        if (state.connectSession(app_id)) |connected| {
-            var session = connected;
-            defer session.close();
-            if (bridge.steam.adapter.listAchievements(&session, allocator)) |achievement_list| {
-                var achievements = achievement_list;
-                defer achievements.deinit();
-                const achievement = findAchievement(achievements.items.items, wanted) orelse
-                    return error.AchievementNotFound;
-                canonical_achievement = try allocator.dupe(u8, achievement.api_name);
-                if (bridge.steam.adapter.unlockAchievement(
-                    &session,
-                    allocator,
-                    state.io,
-                    achievement.api_name,
-                )) |result| {
-                    try writeSuccess(allocator, writer, request.id, .{
-                        .app_id = app_id,
-                        .achievement = achievement.api_name,
-                        .provider = provider,
-                        .route = "steam_abi",
-                        .result = @tagName(result),
-                        .server_acknowledged = true,
-                    });
-                    return;
-                } else |err| {
-                    direct_error = @errorName(err);
-                }
-            } else |err| {
-                direct_error = @errorName(err);
-            }
-        } else |err| {
-            direct_error = @errorName(err);
-        }
-
         var local = try bridge.steam.live_sync.sync(allocator, state.io, .{
             .app_id = app_id,
-            .api_name = canonical_achievement,
+            .api_name = wanted,
             .unlock_time = request.params.timestamp orelse @intCast(unixNow(state.io)),
             .steam_root = try state.getSteamRoot(),
             .backup_root = state.backup_root,
@@ -335,15 +237,13 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
         defer local.deinit();
         try writeSuccess(allocator, writer, request.id, .{
             .app_id = app_id,
-            .achievement = canonical_achievement,
+            .achievement = local.api_name,
             .provider = provider,
-            .route = "steam_local_cache",
-            .direct_error = direct_error,
+            .route = "steam_local_projection",
+            .server_request = false,
             .changed = local.changed,
-            .cache_confirmed = local.cache_confirmed,
+            .projection_confirmed = local.cache_confirmed and local.host_status == .captured,
             .host_status = @tagName(local.host_status),
-            .steam_refreshed = local.steam_refreshed,
-            .steam_confirmed = local.steam_confirmed,
             .stat_id = local.stat_id,
             .bit = local.bit,
             .permission = local.permission,

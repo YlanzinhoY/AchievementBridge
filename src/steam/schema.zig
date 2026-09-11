@@ -7,6 +7,17 @@ pub const AchievementLocation = struct {
     permission: i32,
 };
 
+pub const ResolvedAchievement = struct {
+    allocator: std.mem.Allocator,
+    api_name: []u8,
+    location: AchievementLocation,
+
+    pub fn deinit(self: *ResolvedAchievement) void {
+        self.allocator.free(self.api_name);
+        self.* = undefined;
+    }
+};
+
 /// Resolves an achievement API name to the stat bit used by Steam's native
 /// UserGameStats cache. Steam schemas group up to 32 achievements per stat.
 pub fn findAchievement(
@@ -15,7 +26,20 @@ pub fn findAchievement(
     app_id: u32,
     api_name: []const u8,
 ) !AchievementLocation {
-    if (api_name.len == 0 or api_name.len > 256 or std.mem.indexOfScalar(u8, api_name, 0) != null)
+    var resolved = try resolveAchievement(allocator, bytes, app_id, api_name);
+    defer resolved.deinit();
+    return resolved.location;
+}
+
+/// Resolves either the canonical API name or its numeric provider suffix using
+/// only Steam's local schema. This deliberately avoids a Steam server request.
+pub fn resolveAchievement(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    app_id: u32,
+    wanted: []const u8,
+) !ResolvedAchievement {
+    if (wanted.len == 0 or wanted.len > 256 or std.mem.indexOfScalar(u8, wanted, 0) != null)
         return error.InvalidAchievementApiName;
     var document = try bkv.parse(allocator, bytes);
     defer document.deinit();
@@ -37,19 +61,33 @@ pub fn findAchievement(
             if (bit_number >= 32) continue;
             const name_node = bit_node.child("name") orelse continue;
             const candidate = bkv.stringValue(bytes, name_node) orelse continue;
-            if (!std.ascii.eqlIgnoreCase(candidate, api_name)) continue;
+            if (!achievementNameMatches(candidate, wanted)) continue;
             const permission = if (bit_node.child("permission")) |node|
                 @as(i32, @bitCast(@as(u32, @truncate(try bkv.unsignedValue(bytes, node)))))
             else
                 0;
             return .{
-                .stat_id = stat_id,
-                .bit = @intCast(bit_number),
-                .permission = permission,
+                .allocator = allocator,
+                .api_name = try allocator.dupe(u8, candidate),
+                .location = .{
+                    .stat_id = stat_id,
+                    .bit = @intCast(bit_number),
+                    .permission = permission,
+                },
             };
         }
     }
     return error.AchievementNotFoundInSteamSchema;
+}
+
+fn achievementNameMatches(candidate: []const u8, wanted: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(candidate, wanted)) return true;
+    const wanted_number = std.fmt.parseInt(u32, wanted, 10) catch return false;
+    var start = candidate.len;
+    while (start > 0 and std.ascii.isDigit(candidate[start - 1])) start -= 1;
+    if (start == candidate.len) return false;
+    const candidate_number = std.fmt.parseInt(u32, candidate[start..], 10) catch return false;
+    return candidate_number == wanted_number;
 }
 
 fn appendCString(output: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
@@ -93,4 +131,9 @@ test "resolve protected achievement to stat id and bit" {
     try std.testing.expectEqual(@as(u32, 1), result.stat_id);
     try std.testing.expectEqual(@as(u5, 9), result.bit);
     try std.testing.expectEqual(@as(i32, 2), result.permission);
+
+    var numeric = try resolveAchievement(std.testing.allocator, bytes.items, 3751950, "10");
+    defer numeric.deinit();
+    try std.testing.expectEqualStrings("ACObsidian_Ach_10", numeric.api_name);
+    try std.testing.expectEqual(@as(u32, 1), numeric.location.stat_id);
 }

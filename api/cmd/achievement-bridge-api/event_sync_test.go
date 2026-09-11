@@ -22,11 +22,11 @@ func TestEventSyncerStampsDetectedAndSyncedAchievement(t *testing.T) {
 	syncer := &eventSyncer{
 		stamps: stamps,
 		call: func(_ context.Context, method string, _ any, result any) error {
-			if method != "store_steam_achievement" {
+			if method != "project_local_achievement" {
 				t.Fatalf("unexpected core method: %s", method)
 			}
 			output := result.(*map[string]any)
-			*output = map[string]any{"route": "local-cache", "achievement": "AWARD_SHARKS_CANONICAL"}
+			*output = map[string]any{"route": "steam_local_projection", "achievement": "AWARD_SHARKS_CANONICAL"}
 			return nil
 		},
 	}
@@ -38,7 +38,7 @@ func TestEventSyncerStampsDetectedAndSyncedAchievement(t *testing.T) {
 	if stamps.events[0].SteamStatus != "detected" || stamps.events[1].SteamStatus != "synced" {
 		t.Fatalf("unexpected stamp transition: %+v", stamps.events)
 	}
-	if stamps.events[1].SteamRoute != "local-cache" || stamps.events[1].UnlockedAt != 123 {
+	if stamps.events[1].SteamRoute != "steam_local_projection" || stamps.events[1].UnlockedAt != 123 {
 		t.Fatalf("unexpected synchronized stamp: %+v", stamps.events[1])
 	}
 	if stamps.events[1].SourceID != "AWARD_SHARKS" || stamps.events[1].CanonicalAPIName != "AWARD_SHARKS_CANONICAL" {
@@ -51,7 +51,7 @@ func TestEventSyncerPreservesAchievementWhenSteamSyncFails(t *testing.T) {
 	syncer := &eventSyncer{
 		stamps: stamps,
 		call: func(context.Context, string, any, any) error {
-			return errors.New("Steam refused StoreStats")
+			return errors.New("local projection unavailable")
 		},
 	}
 	syncer.syncEvent(&achievementEvent{AppID: 3046600, Provider: "rune", Achievement: "ACHIEVEMENT_002"})

@@ -116,7 +116,7 @@ func (s *eventSyncer) syncEvent(event *achievementEvent) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	var result map[string]any
-	if err := s.call(ctx, "store_steam_achievement", params, &result); err != nil {
+	if err := s.call(ctx, "project_local_achievement", params, &result); err != nil {
 		s.recordStamp(event, "failed", "", "")
 		log.Printf("automatic Steam sync failed appid=%d achievement=%s provider=%s: %v", event.AppID, event.Achievement, event.Provider, err)
 		return
@@ -131,16 +131,15 @@ func (s *eventSyncer) syncEvent(event *achievementEvent) {
 	}
 	s.recordStamp(event, "synced", route, canonical)
 	log.Printf(
-		"automatic Steam sync complete appid=%d achievement=%s provider=%s route=%v changed=%v cache_confirmed=%v host_status=%v steam_refreshed=%v steam_confirmed=%v native_notification=%v",
+		"automatic local projection complete appid=%d achievement=%s provider=%s route=%v changed=%v projection_confirmed=%v host_status=%v server_request=%v native_notification=%v",
 		event.AppID,
 		event.Achievement,
 		event.Provider,
 		result["route"],
 		result["changed"],
-		result["cache_confirmed"],
+		result["projection_confirmed"],
 		result["host_status"],
-		result["steam_refreshed"],
-		result["steam_confirmed"],
+		result["server_request"],
 		result["native_notification"],
 	)
 }

@@ -72,7 +72,7 @@ type remoteErrorCore struct{ calls int }
 
 func (c *remoteErrorCore) Call(context.Context, string, any, any) error {
 	c.calls++
-	return &core.RemoteError{Code: "SetAchievementFailed", Message: "denied"}
+	return &core.RemoteError{Code: "AchievementNotFound", Message: "not found"}
 }
 
 func TestCallCoreDoesNotRestartForRemoteErrors(t *testing.T) {

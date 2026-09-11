@@ -60,7 +60,7 @@ period has allowed providers to flush late state to disk.
 
 ```text
 game opens -> resolve provider -> baseline -> poll active state
-game event -> verify in provider -> journal -> Zig Steam operation
+game event -> verify in provider -> journal -> Zig local Steam projection
 game closes -> final polling grace -> close watcher
 ```
 
@@ -71,19 +71,28 @@ only the authoritative Steam catalog is requested from Zig through the ABI.
 ## Zig native core
 
 The Zig executable is an on-demand native boundary. In `serve` mode it listens only on
-`127.0.0.1` and processes native commands serially. A Steam session lives for
-one complete operation, including every callback and rollback, then closes so
-Steam does not keep the queried AppID associated with the persistent process.
-Serial execution prevents overlapping callback queues and `StoreStats`
-transactions.
+`127.0.0.1` and processes native commands serially. A Steam session lives only
+for the local ABI operation that requested it, then closes so Steam does not
+keep the queried AppID associated with the persistent process.
 
-The normal 0.3 flow calls `store_steam_achievement` only after Go has verified
-the provider event. Zig owns `ISteamUserStats`, `SetAchievement`, `StoreStats`,
-Binary KeyValues, local-cache fallback, the Steam host DLL and native memory
-adapters. GTA V Enhanced memory inspection remains here because it requires
-Windows process memory access, but Go decides when that adapter is sampled.
+The normal 0.3 flow calls `project_local_achievement` only after Go has verified
+the provider event. This operation never
+calls `SetAchievement`, `ClearAchievement` or `StoreStats` and never asks the
+Steam server to accept an unlock. Zig resolves the local Binary KeyValues
+schema, updates the local projection and informs the in-process Steam host.
+GTA V Enhanced memory inspection remains here because it requires Windows
+process memory access, but Go decides when that adapter is sampled.
 
-Toast previews are notification-only: the core reads Steam metadata and asks the Achievement Bridge Windows notifier to render it without calling `SetAchievement`, `ClearAchievement` or `StoreStats`. Startup recovery and the rollback endpoint remain available only to clean transaction records created by older Bridge versions; new previews never create one.
+The provider journal is the source of truth. Steam's native stats cache is a
+rebuildable projection, while the Bridge overlay persists the local view. On a
+Steam restart the host reapplies persisted overlays once, after both the active
+account and managed AppIDs are known. This repairs a stale library page without
+replaying provider events or showing historical unlock popups.
+
+Toast previews are notification-only: the core reads Steam metadata and asks
+the Achievement Bridge Windows notifier to render it without changing any
+achievement state. The rollback endpoint is retained as a state-neutral
+compatibility response for older interfaces.
 
 Protocol v1 uses one UTF-8 JSON object per TCP connection, terminated by a newline. The core writes one response and closes the connection.
 

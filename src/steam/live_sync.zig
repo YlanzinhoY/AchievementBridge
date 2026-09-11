@@ -17,14 +17,9 @@ pub const HostStatus = enum {
 pub const NativeNotificationStatus = enum {
     not_requested,
     not_new,
-    store_queued,
     progress_queued,
-    already_unlocked,
     steam_unavailable,
-    stats_unavailable,
-    set_failed,
     progress_failed,
-    store_failed,
     sync_unconfirmed,
 };
 
@@ -40,6 +35,7 @@ pub const Options = struct {
 
 pub const Result = struct {
     allocator: std.mem.Allocator,
+    api_name: []u8,
     changed: bool,
     account_id: u32,
     stat_id: u32,
@@ -49,13 +45,12 @@ pub const Result = struct {
     crc: u32,
     host_status: HostStatus,
     cache_confirmed: bool,
-    steam_refreshed: bool,
-    steam_confirmed: bool,
     native_notification: NativeNotificationStatus,
     stats_path: []u8,
     backup_path: ?[]u8,
 
     pub fn deinit(self: *Result) void {
+        self.allocator.free(self.api_name);
         self.allocator.free(self.stats_path);
         if (self.backup_path) |path| self.allocator.free(path);
         self.* = undefined;
@@ -101,7 +96,9 @@ pub fn sync(allocator: std.mem.Allocator, io: std.Io, options: Options) !Result 
     defer allocator.free(schema_path);
     const schema_bytes = try std.Io.Dir.cwd().readFileAlloc(io, schema_path, allocator, .limited(64 * 1024 * 1024));
     defer allocator.free(schema_bytes);
-    const location = try schema.findAchievement(allocator, schema_bytes, options.app_id, options.api_name);
+    var resolved = try schema.resolveAchievement(allocator, schema_bytes, options.app_id, options.api_name);
+    errdefer resolved.deinit();
+    const location = resolved.location;
 
     const account_id = options.account_id orelse (steam_install.findActiveAccountId() catch
         try findStatsAccountId(allocator, io, options.steam_root, options.app_id));
@@ -144,19 +141,6 @@ pub fn sync(allocator: std.mem.Allocator, io: std.Io, options: Options) !Result 
     else
         false;
 
-    var steam_refreshed = false;
-    var steam_confirmed = false;
-    if (host_status == .captured) {
-        if (adapter.connect(allocator, options.app_id, options.steam_root)) |session_value| {
-            var session = session_value;
-            defer session.close();
-            if (session.client.loadCurrentUserStats(io, options.app_id, 5000)) |_| {
-                steam_refreshed = true;
-                steam_confirmed = adapter.isAchievementUnlocked(&session, allocator, options.api_name) catch false;
-            } else |_| {}
-        } else |_| {}
-    }
-
     const native_notification: NativeNotificationStatus = if (!options.experimental_native_notification)
         .not_requested
     else if (!mutation.changed)
@@ -164,10 +148,11 @@ pub fn sync(allocator: std.mem.Allocator, io: std.Io, options: Options) !Result 
     else if (!cache_confirmed or host_status != .captured)
         .sync_unconfirmed
     else
-        tryNativeNotification(allocator, io, options.app_id, options.api_name, options.steam_root);
+        tryNativeNotification(allocator, options.app_id, resolved.api_name, options.steam_root);
 
     return .{
         .allocator = allocator,
+        .api_name = resolved.api_name,
         .changed = mutation.changed,
         .account_id = account_id,
         .stat_id = location.stat_id,
@@ -177,8 +162,6 @@ pub fn sync(allocator: std.mem.Allocator, io: std.Io, options: Options) !Result 
         .crc = mutation.crc,
         .host_status = host_status,
         .cache_confirmed = cache_confirmed,
-        .steam_refreshed = steam_refreshed,
-        .steam_confirmed = steam_confirmed,
         .native_notification = native_notification,
         .stats_path = stats_path,
         .backup_path = backup_path,
@@ -239,18 +222,13 @@ pub fn clear(allocator: std.mem.Allocator, io: std.Io, options: ClearOptions) !C
 
 fn tryNativeNotification(
     allocator: std.mem.Allocator,
-    io: std.Io,
     app_id: u32,
     api_name: []const u8,
     steam_root: []const u8,
 ) NativeNotificationStatus {
     var session = adapter.connect(allocator, app_id, steam_root) catch return .steam_unavailable;
     defer session.close();
-    adapter.queueAchievementProgressNotification(&session, allocator, io, api_name) catch |err| return switch (err) {
-        error.UserStatsRequestFailed,
-        error.UserStatsRequestRejected,
-        error.UserStatsCallbackTimeout,
-        => .stats_unavailable,
+    adapter.queueAchievementProgressNotification(&session, allocator, api_name) catch |err| return switch (err) {
         error.AchievementProgressNotificationFailed => .progress_failed,
         else => .steam_unavailable,
     };

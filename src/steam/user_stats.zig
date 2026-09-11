@@ -58,33 +58,6 @@ fn resolveAchievementImageUrl(allocator: std.mem.Allocator, app_id: u32, image: 
 pub const UserStats = struct {
     pointer: *anyopaque,
 
-    pub fn isAchievementUnlocked(self: *const UserStats, api_name: [*:0]const u8) !bool {
-        var achieved: u8 = 0;
-        var unlock_time: u32 = 0;
-        if (!self.getAchievementAndUnlockTime(api_name, &achieved, &unlock_time)) return error.GetAchievementFailed;
-        return achieved != 0;
-    }
-
-    /// Changes the current Steam user's in-memory state. Call storeStats after
-    /// this succeeds to persist the unlock on Steam's servers.
-    pub fn setAchievement(self: *const UserStats, api_name: [*:0]const u8) bool {
-        const Function = *const fn (*anyopaque, [*:0]const u8) callconv(.c) u8;
-        return vtable.getMethod(self.pointer, 6, Function)(self.pointer, api_name) != 0;
-    }
-
-    /// Resets one achievement in memory. Call storeStats to persist the reset.
-    /// Steam documents this operation primarily for testing.
-    pub fn clearAchievement(self: *const UserStats, api_name: [*:0]const u8) bool {
-        const Function = *const fn (*anyopaque, [*:0]const u8) callconv(.c) u8;
-        return vtable.getMethod(self.pointer, 7, Function)(self.pointer, api_name) != 0;
-    }
-
-    /// Uploads pending stats and achievement changes to Steam.
-    pub fn storeStats(self: *const UserStats) bool {
-        const Function = *const fn (*anyopaque) callconv(.c) u8;
-        return vtable.getMethod(self.pointer, 9, Function)(self.pointer) != 0;
-    }
-
     /// Asks the Steam Overlay to display the native progress notification.
     /// This does not change or persist achievement state.
     pub fn indicateAchievementProgress(self: *const UserStats, api_name: [*:0]const u8, current: u32, maximum: u32) bool {
@@ -169,30 +142,12 @@ pub const UserStats = struct {
     }
 };
 
-test "Steam achievement methods use ISteamUserStats013 slots 6, 7, 9, and 12" {
+test "Steam achievement notification uses ISteamUserStats013 slot 12" {
     const Fake = struct {
-        var set_called = false;
-        var clear_called = false;
-        var store_called = false;
         var progress_called = false;
 
         fn unused(_: *anyopaque) callconv(.c) u8 {
             return 0;
-        }
-
-        fn set(_: *anyopaque, name: [*:0]const u8) callconv(.c) u8 {
-            set_called = std.mem.eql(u8, std.mem.span(name), "ACH_TEST");
-            return @intFromBool(set_called);
-        }
-
-        fn clear(_: *anyopaque, name: [*:0]const u8) callconv(.c) u8 {
-            clear_called = std.mem.eql(u8, std.mem.span(name), "ACH_TEST");
-            return @intFromBool(clear_called);
-        }
-
-        fn store(_: *anyopaque) callconv(.c) u8 {
-            store_called = true;
-            return 1;
         }
 
         fn progress(_: *anyopaque, name: [*:0]const u8, current: u32, maximum: u32) callconv(.c) u8 {
@@ -200,24 +155,12 @@ test "Steam achievement methods use ISteamUserStats013 slots 6, 7, 9, and 12" {
             return @intFromBool(progress_called);
         }
     };
-    Fake.set_called = false;
-    Fake.clear_called = false;
-    Fake.store_called = false;
     Fake.progress_called = false;
     var methods = [_]*const anyopaque{@ptrCast(&Fake.unused)} ** 13;
-    methods[6] = @ptrCast(&Fake.set);
-    methods[7] = @ptrCast(&Fake.clear);
-    methods[9] = @ptrCast(&Fake.store);
     methods[12] = @ptrCast(&Fake.progress);
     var object: [*]const *const anyopaque = &methods;
     const stats = UserStats{ .pointer = @ptrCast(&object) };
-    try std.testing.expect(stats.setAchievement("ACH_TEST"));
-    try std.testing.expect(stats.clearAchievement("ACH_TEST"));
-    try std.testing.expect(stats.storeStats());
     try std.testing.expect(stats.indicateAchievementProgress("ACH_TEST", 1, 2));
-    try std.testing.expect(Fake.set_called);
-    try std.testing.expect(Fake.clear_called);
-    try std.testing.expect(Fake.store_called);
     try std.testing.expect(Fake.progress_called);
 }
 
