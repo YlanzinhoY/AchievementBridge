@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string] $Version = '0.3.0',
+    [string] $Version = '0.3.1',
     [switch] $SkipZigBuild,
     [switch] $SkipGoBuild,
     [switch] $CleanReleases
