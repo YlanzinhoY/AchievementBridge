@@ -40,39 +40,13 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (cli.command == .serve) {
-        const appdata = init.environ_map.get("APPDATA") orelse return error.MissingAppData;
-        const localappdata = init.environ_map.get("LOCALAPPDATA") orelse return error.MissingLocalAppData;
         const preview_transaction_path = try defaultPreviewTransactionPath(allocator, init.environ_map);
-        const journal_path = try defaultJournalPath(allocator, init.environ_map);
-        const replay_guard_path = try defaultR2ReplayGuardPath(allocator, init.environ_map);
         const backup_root = try defaultBackupRoot(allocator, init.environ_map);
-        const support_root = try std.fs.path.join(allocator, &.{ localappdata, "AchievementBridge", "support" });
-        const gse_roots = &[_][]const u8{
-            try std.fs.path.join(allocator, &.{ appdata, "GSE Saves" }),
-            try std.fs.path.join(allocator, &.{ appdata, "Goldberg SteamEmu Saves" }),
-        };
-        const r2_roots = &[_][]const u8{
-            try std.fs.path.join(allocator, &.{ appdata, "Goldberg UplayEmu Saves" }),
-        };
-        const rune_roots = &[_][]const u8{try defaultRuneRoot(allocator, init.environ_map)};
-        var rockstar_roots: std.ArrayList([]const u8) = .empty;
-        try addDefaultRockstarRoots(allocator, init.environ_map, &rockstar_roots);
-        const spool_root = try std.fs.path.join(allocator, &.{ localappdata, "Ubisoft Game Launcher", "spool" });
         try bridge.control.server.run(allocator, init.io, .{
             .port = cli.port,
             .steam_root = cli.steam_root,
             .preview_transaction_path = preview_transaction_path,
-            .monitor = .{
-                .gse_roots = gse_roots,
-                .r2_roots = r2_roots,
-                .rune_roots = rune_roots,
-                .rockstar_roots = rockstar_roots.items,
-                .spool_root = spool_root,
-                .journal_path = journal_path,
-                .replay_guard_path = replay_guard_path,
-                .backup_root = backup_root,
-                .support_root = support_root,
-            },
+            .backup_root = backup_root,
         });
         return;
     }
