@@ -7,8 +7,8 @@ Typer/Rich CLI
     HTTP/JSON on 127.0.0.1:47650
 Go control plane
     NDJSON protocol v1 on 127.0.0.1:47651
-Persistent Zig core
-    Steam ABI, provider data and local state
+On-demand Zig native adapter
+    Steam ABI, callbacks, cache and native adapters
 ```
 
 ## Python interface
@@ -17,7 +17,7 @@ The Python application owns rendering, prompts and user-friendly error messages.
 
 When installed, the CLI locates `achievement-bridge-api.exe` beside itself. When run from the source tree it locates the gateway in `zig-out/bin`. If the API is not running, the CLI starts it once in the background and records its output in `%LOCALAPPDATA%\AchievementBridge\bridge-api.log`.
 
-The API has a service-style lifetime independent from the CLI. Closing the log stream or the terminal leaves the single Go process and its owned Zig child active. The menu's **Desativar Bridge** action, the `stop` command, or `POST /v1/shutdown` performs the explicit shutdown.
+The API has a service-style lifetime independent from the CLI. Closing the log stream or the terminal leaves the single Go process active. Zig is started only when a native operation is requested. The menu's **Desativar Bridge** action, the `stop` command, or `POST /v1/shutdown` performs the explicit shutdown.
 
 ## Go control plane
 
@@ -25,8 +25,13 @@ The Go process is the stable API boundary for any user interface. It:
 
 - exposes HTTP/JSON endpoints under `/v1`;
 - validates transport-level input;
-- starts and supervises one Zig core when necessary;
-- translates HTTP requests into protocol-v1 core messages;
+- discovers Steam game processes and owns their lifecycle;
+- starts exactly one provider watcher for each active game session;
+- parses GSE, RUNE, Uplay R2, Ubisoft and compatible Rockstar state;
+- owns provider configuration, the journal and event deduplication;
+- performs a final provider read after the last game process exits;
+- starts and supervises the Zig native core when an ABI operation is necessary;
+- translates native requests into protocol-v1 core messages;
 - binds only to the Windows loopback interface.
 
 Current endpoints:
@@ -41,11 +46,42 @@ Current endpoints:
 - `GET /v1/monitor/events`
 - `POST /v1/shutdown`
 
-The API contains no Steam vtable offsets, cache format logic or provider parsing.
+The API contains no Steam vtable offsets or Steam cache format logic. Provider
+implementations share a small `Snapshot`/`Watcher` contract, so a new provider
+does not change the HTTP layer or the native core.
 
-## Zig core
+## Session-scoped providers
 
-The Zig executable remains the authority for Steam and achievement state. In `serve` mode it listens only on `127.0.0.1` and processes control commands serially. The monitor workers run inside this same process after `start_monitor`; Go consumes their canonical achievement envelopes, requests verified synchronization back through the core and publishes the same output as an SSE stream for optional UIs. A Steam session lives for one complete operation, including every callback and rollback, then closes so Steam does not keep the queried AppID associated with the persistent process. Serial control execution prevents overlapping callback queues and `StoreStats` transactions.
+The monitor is idle while no compatible game is running. Once an executable is
+found below an installed Steam game directory, Go resolves its provider and
+creates one watcher for that AppID. Helper processes are grouped into the same
+session. The watcher stops only after the final process exits and a short grace
+period has allowed providers to flush late state to disk.
+
+```text
+game opens -> resolve provider -> baseline -> poll active state
+game event -> verify in provider -> journal -> Zig Steam operation
+game closes -> final polling grace -> close watcher
+```
+
+Existing support manifests override heuristic detection and carry identities
+such as the Uplay product ID. Preparing Uplay R2 support is now a Go operation;
+only the authoritative Steam catalog is requested from Zig through the ABI.
+
+## Zig native core
+
+The Zig executable is an on-demand native boundary. In `serve` mode it listens only on
+`127.0.0.1` and processes native commands serially. A Steam session lives for
+one complete operation, including every callback and rollback, then closes so
+Steam does not keep the queried AppID associated with the persistent process.
+Serial execution prevents overlapping callback queues and `StoreStats`
+transactions.
+
+The normal 0.3 flow calls `store_steam_achievement` only after Go has verified
+the provider event. Zig owns `ISteamUserStats`, `SetAchievement`, `StoreStats`,
+Binary KeyValues, local-cache fallback, the Steam host DLL and native memory
+adapters. GTA V Enhanced memory inspection remains here because it requires
+Windows process memory access, but Go decides when that adapter is sampled.
 
 Toast previews are notification-only: the core reads Steam metadata and asks the Achievement Bridge Windows notifier to render it without calling `SetAchievement`, `ClearAchievement` or `StoreStats`. Startup recovery and the rollback endpoint remain available only to clean transaction records created by older Bridge versions; new previews never create one.
 
@@ -71,8 +107,5 @@ Failure envelope:
 
 The request ID is generated by the Go gateway and must match the response. Unknown fields are ignored so compatible fields can be added within protocol v1.
 
-## Compatibility path
-
-The original Zig commands remain available for diagnostics and scripts. The standalone Python interface no longer launches them for discovery, catalogs, previews, monitoring or event synchronization: those flows use the Go boundary. `watch-all` remains available only for older integrations and direct troubleshooting.
-
-This boundary keeps Steam and provider rules in Zig while allowing another desktop or web UI to replace Python without changing the core.
+This boundary keeps native Steam details in Zig while putting the application,
+provider rules and lifecycle in maintainable Go.
