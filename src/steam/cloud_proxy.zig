@@ -286,8 +286,12 @@ fn handleRequest(request: Request) Status {
     if (!initialized.load(.acquire)) return .cloud_redirect_unavailable;
     if (current_account_id.load(.acquire) == 0) return .invalid_request;
     if (!isManagedApp(request.app_id)) return .app_not_managed;
+    // Persist the new achievement before asking CloudRedirect/Steam to refresh.
+    // Notifying first races the refresh against the overlay update and can leave
+    // the Steam library page showing the previous achievement state.
+    if (!putOverlay(request.app_id, request.stat_id, @intCast(request.bit), request.unlock_time)) return .invalid_request;
     if (real) |api| if (api.notify_stats_stored) |notify| notify(request.app_id);
-    return if (putOverlay(request.app_id, request.stat_id, @intCast(request.bit), request.unlock_time)) .ok else .invalid_request;
+    return .ok;
 }
 
 fn addManagedApp(app_id: u32) void {

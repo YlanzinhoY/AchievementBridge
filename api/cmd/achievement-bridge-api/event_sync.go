@@ -130,7 +130,19 @@ func (s *eventSyncer) syncEvent(event *achievementEvent) {
 		canonical = fmt.Sprint(result["achievement"])
 	}
 	s.recordStamp(event, "synced", route, canonical)
-	log.Printf("automatic Steam sync complete appid=%d achievement=%s provider=%s route=%v", event.AppID, event.Achievement, event.Provider, result["route"])
+	log.Printf(
+		"automatic Steam sync complete appid=%d achievement=%s provider=%s route=%v changed=%v cache_confirmed=%v host_status=%v steam_refreshed=%v steam_confirmed=%v native_notification=%v",
+		event.AppID,
+		event.Achievement,
+		event.Provider,
+		result["route"],
+		result["changed"],
+		result["cache_confirmed"],
+		result["host_status"],
+		result["steam_refreshed"],
+		result["steam_confirmed"],
+		result["native_notification"],
+	)
 }
 
 func (s *eventSyncer) recordStamp(event *achievementEvent, steamStatus string, steamRoute string, canonicalAPIName string) {

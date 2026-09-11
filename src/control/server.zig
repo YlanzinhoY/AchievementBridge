@@ -341,7 +341,12 @@ fn dispatch(state: *State, allocator: std.mem.Allocator, writer: *std.Io.Writer,
             .direct_error = direct_error,
             .changed = local.changed,
             .cache_confirmed = local.cache_confirmed,
+            .host_status = @tagName(local.host_status),
+            .steam_refreshed = local.steam_refreshed,
             .steam_confirmed = local.steam_confirmed,
+            .stat_id = local.stat_id,
+            .bit = local.bit,
+            .permission = local.permission,
             .native_notification = @tagName(local.native_notification),
         });
         return;
