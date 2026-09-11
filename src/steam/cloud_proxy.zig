@@ -46,6 +46,7 @@ var real: ?RealApi = null;
 var server_thread: ?windows.HANDLE = null;
 var stopping: std.atomic.Value(bool) = .init(false);
 var initialized: std.atomic.Value(bool) = .init(false);
+var startup_reconciled: std.atomic.Value(bool) = .init(false);
 var current_account_id: std.atomic.Value(u32) = .init(0);
 var state_mutex: std.atomic.Mutex = .unlocked;
 var managed_apps: [4096]u32 = undefined;
@@ -78,6 +79,7 @@ export fn CR_InitCloudSave(steam_path: [*:0]const u8, notify: NotifyFn) callconv
     const ok = if (real) |api| api.init(steam_path, notify) else true;
     configureOverlayPath(steam_path);
     loadOverlays();
+    startup_reconciled.store(false, .release);
     if (ok and server_thread == null) {
         stopping.store(false, .release);
         server_thread = kernel32.CreateThread(null, 0, pipeThreadMain, null, 0, null);
@@ -108,6 +110,7 @@ export fn CR_IsApp(app_id: u32) callconv(.c) bool {
 export fn CR_SetAccountId(account_id: u32) callconv(.c) void {
     current_account_id.store(account_id, .release);
     if (real) |api| if (api.set_account_id) |function| function(account_id);
+    reconcilePersistedOverlays();
 }
 
 export fn CR_SetApps(app_ids: ?[*]const u32, count: u32) callconv(.c) void {
@@ -122,6 +125,7 @@ export fn CR_SetApps(app_ids: ?[*]const u32, count: u32) callconv(.c) void {
         }
     }
     if (real) |api| api.set_apps(app_ids, count);
+    reconcilePersistedOverlays();
 }
 
 export fn CR_DrainPlaytimeUpdates() callconv(.c) void {
@@ -319,6 +323,47 @@ fn isManagedApp(app_id: u32) bool {
     defer state_mutex.unlock();
     for (managed_apps[0..managed_app_count]) |existing| if (existing == app_id) return true;
     return false;
+}
+
+/// Reprojects the persisted overlay once after Steam has supplied both the
+/// active account and managed AppIDs. This repairs a stale client page after a
+/// restart without replaying provider events or requesting Steam server stats.
+fn reconcilePersistedOverlays() void {
+    if (startup_reconciled.load(.acquire)) return;
+    const api = real orelse return;
+    const notify = api.notify_stats_stored orelse return;
+    const account_id = current_account_id.load(.acquire);
+    if (account_id == 0) return;
+
+    var app_ids: [4096]u32 = undefined;
+    var app_count: usize = 0;
+    lockState();
+    for (overlays[0..overlay_count]) |entry| {
+        if (entry.account_id != 0 and entry.account_id != account_id) continue;
+        var managed = false;
+        for (managed_apps[0..managed_app_count]) |candidate| {
+            if (candidate == entry.app_id) {
+                managed = true;
+                break;
+            }
+        }
+        if (!managed) continue;
+        var duplicate = false;
+        for (app_ids[0..app_count]) |candidate| {
+            if (candidate == entry.app_id) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate and app_count < app_ids.len) {
+            app_ids[app_count] = entry.app_id;
+            app_count += 1;
+        }
+    }
+    state_mutex.unlock();
+
+    if (app_count == 0 or startup_reconciled.swap(true, .acq_rel)) return;
+    for (app_ids[0..app_count]) |app_id| notify(app_id);
 }
 
 fn putOverlay(app_id: u32, stat_id: u32, bit: u5, unlock_time: u32) bool {
